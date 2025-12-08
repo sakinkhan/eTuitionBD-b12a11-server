@@ -26,18 +26,35 @@ async function run() {
     await client.connect();
 
     const db = client.db("eTuitionBD_db");
-    const tutorCollection = db.collection("tutors");
+    const usersCollection = db.collection("users");
 
-    /** -------- Tutor ENDPOINTS -------- **/
-    app.get("/tutors", async (req, res) => {
-      const cursor = tutorCollection.find();
-      const result = await cursor.toArray();
+    /*-----------USER ENDPOINTS---------*/
+    // Get all users OR filter by role
+    app.get("/users", async (req, res) => {
+      const role = req.query.role;
+      const filter = role ? { role } : {};
+
+      const cursor = await usersCollection.find(filter);
+      const result = cursor.toArray();
       res.send(result);
     });
 
-    app.post("/tutors", async (req, res) => {
-      const tutor = req.body;
-      const result = await tutorCollection.insertOne(tutor);
+    // create a new user
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+
+      // Ensure role exists
+      if (!user.role) {
+        return res.status(400).send({ error: "Role is required" });
+      }
+
+      // Prevent duplicate email entry
+      const exists = await usersCollection.findOne({ email: user.email });
+      if (exists) {
+        return res.status(409).send({ error: "User already exists" });
+      }
+
+      const result = await usersCollection.insertOne(user);
       res.send(result);
     });
 
