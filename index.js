@@ -25,7 +25,8 @@ const verifyFBToken = async (req, res, next) => {
   }
 
   try {
-    const idToken = token.split(" ")[1];
+    const idToken = token?.split(" ")?.[1];
+    if (!idToken) return res.status(401).send({ message: "Invalid token" });
     const decoded = await admin.auth().verifyIdToken(idToken);
     console.log("decoded in the token", decoded);
     // req.decoded_email = decoded.email;
@@ -58,15 +59,22 @@ async function run() {
     const tuitionPostsCollection = db.collection("tuitionPosts");
 
     /*-----------USER ENDPOINTS---------*/
-    // GET all users OR filter by role
+    // GET all users
     app.get("/users", async (req, res) => {
       const role = req.query.role;
-      console.log("HEADERS", req.headers);
-      const filter = role ? { role } : {};
 
-      const cursor = usersCollection.find(filter);
+      const query = {};
+
+      const cursor = usersCollection.find(query).sort({ createdAt: -1 });
       const result = await cursor.toArray();
       res.send(result);
+    });
+    // GET users filter by role
+    app.get("/users/:email/role", async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+      res.send({ role: user?.role || "user" });
     });
 
     // create/POST a new user
@@ -103,15 +111,6 @@ async function run() {
         res.status(500).send({ error: "Failed to fetch tuition posts" });
       }
     });
-
-    // GET Single tuition post by id
-    app.get("/tuition-posts/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await tuitionPostsCollection.findOne(query);
-      res.send(result);
-    });
-
     // GET all my tuition posts
     app.get("/tuition-posts/my-posts", verifyFBToken, async (req, res) => {
       const fbEmail = req.user?.email;
@@ -123,6 +122,14 @@ async function run() {
         .find({ userEmail: fbEmail })
         .sort({ createdAt: -1 });
       const result = await cursor.toArray();
+      res.send(result);
+    });
+
+    // GET Single tuition post by id
+    app.get("/tuition-posts/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await tuitionPostsCollection.findOne(query);
       res.send(result);
     });
 
