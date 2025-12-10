@@ -28,12 +28,26 @@ const verifyFBToken = async (req, res, next) => {
     const idToken = token?.split(" ")?.[1];
     if (!idToken) return res.status(401).send({ message: "Invalid token" });
     const decoded = await admin.auth().verifyIdToken(idToken);
-    console.log("decoded in the token", decoded);
-    // req.decoded_email = decoded.email;
     req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).send({ message: "unauthorized access" });
+  }
+};
+
+const verifyAdmin = (usersCollection) => async (req, res, next) => {
+  try {
+    const fbEmail = req.user?.email;
+    if (!fbEmail) return res.status(401).send({ message: "unauthorized" });
+
+    const user = await usersCollection.findOne({ email: fbEmail });
+    if (!user || !user.isAdmin) {
+      return res.status(403).send({ message: "forbidden access: admin only" });
+    }
+    next();
+  } catch (err) {
+    console.error("verifyAdmin error", err);
+    res.status(500).send({ message: "server error" });
   }
 };
 
@@ -60,21 +74,49 @@ async function run() {
 
     /*-----------USER ENDPOINTS---------*/
     // GET all users
-    app.get("/users", async (req, res) => {
-      const role = req.query.role;
-
+    app.get("/users", verifyFBToken, async (req, res) => {
+      const searchText = req.query.searchText;
       const query = {};
 
-      const cursor = usersCollection.find(query).sort({ createdAt: -1 });
+      if (searchText) {
+        query.$or = [
+          { displayName: { $regex: searchText, $options: "i" } },
+          { email: { $regex: searchText, $options: "i" } },
+        ];
+      }
+
+      const cursor = usersCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(7);
       const result = await cursor.toArray();
       res.send(result);
     });
+
+    // GET single user by email
+    app.get("/users/:email", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ error: "User not found" });
+        }
+
+        res.send(user);
+      } catch (error) {
+        console.error("GET /users/:email error:", error);
+        res.status(500).send({ error: "Internal Server Error" });
+      }
+    });
+
     // GET users filter by role
-    app.get("/users/:email/role", async (req, res) => {
+    app.get("/users/:email/role", verifyFBToken, async (req, res) => {
       const email = req.params.email;
       const query = { email };
       const user = await usersCollection.findOne(query);
-      res.send({ role: user?.role || "user" });
+      if (!user) return res.status(404).send({ error: "User not found" });
+      res.send({ role: user.role || "student", isAdmin: !!user.isAdmin });
     });
 
     // create/POST a new user
@@ -96,11 +138,84 @@ async function run() {
       res.send(result);
     });
 
+    // PATCH / Update user info:
+    app.patch(
+      "/users/:id",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+
+        const { name, phone, role, photoURL, verified } = req.body;
+
+        const updateFields = {};
+        if (name) updateFields.name = name;
+        if (phone) updateFields.phone = phone;
+        if (photoURL) updateFields.photoURL = photoURL;
+        if (role) updateFields.role = role;
+        if (typeof verified === "boolean") updateFields.verified = verified;
+
+        const result = await usersCollection.updateOne(query, {
+          $set: updateFields,
+        });
+
+        res.send(result);
+      }
+    );
+
+    // PATCH/ Update user role
+    app.patch(
+      "/users/:id/admin",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const query = { _id: new ObjectId(id) };
+          const updatedDoc = {
+            $set: {
+              isAdmin: !!req.body.isAdmin,
+            },
+          };
+          const result = await usersCollection.updateOne(query, updatedDoc);
+          res.send(result);
+        } catch (err) {
+          console.error("PATCH /users/:id/admin error:", err);
+          res.status(500).send({ error: "Internal Server Error" });
+        }
+      }
+    );
+
+    // DELETE User
+    app.delete(
+      "/users/:id",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await usersCollection.deleteOne(query);
+        res.send(result);
+      }
+    );
+
     /*-----------Tuition Post ENDPOINTS---------*/
     // GET all tuition posts (latest first)
     app.get("/tuition-posts", async (req, res) => {
       try {
         const query = {};
+        const search = req.query.search;
+
+        if (search) {
+          query.$or = [
+            { subject: { $regex: search, $options: "i" } },
+            { classLevel: { $regex: search, $options: "i" } },
+            { location: { $regex: search, $options: "i" } },
+            { studentName: { $regex: search, $options: "i" } },
+            { description: { $regex: search, $options: "i" } },
+          ];
+        }
         const cursor = tuitionPostsCollection
           .find(query)
           .sort({ createdAt: -1 });
