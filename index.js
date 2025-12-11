@@ -71,6 +71,9 @@ async function run() {
     const db = client.db("eTuitionBD_db");
     const usersCollection = db.collection("users");
     const tuitionPostsCollection = db.collection("tuitionPosts");
+    const tuitionApplicationsCollection = db.collection(
+      "tuitionApplicationsCollection"
+    );
 
     /*-----------USER ENDPOINTS---------*/
     // GET all users
@@ -383,6 +386,121 @@ async function run() {
         _id: new ObjectId(id),
       });
 
+      res.send(result);
+    });
+
+    /*-----------Tutor Application ENDPOINTS---------*/
+    // GET all applications for a specific tuition post for Student dashboard
+    app.get(
+      "/applications/by-tuition/:tuitionPostId",
+      verifyFBToken,
+      async (req, res) => {
+        const tuitionPostId = req.params.tuitionId;
+
+        const result = await tuitionApplicationsCollection
+          .find({ tuitionPostId })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      }
+    );
+
+    // GET all applications created by the logged-in tutor
+    app.get(
+      "/applications/my-applications",
+      verifyFBToken,
+      async (req, res) => {
+        const fbEmail = req.user?.email;
+
+        if (!fbEmail) {
+          return res.status(400).send({ error: "Invalid authentication" });
+        }
+
+        const result = await tuitionApplicationsCollection
+          .find({ tutorEmail: fbEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      }
+    );
+
+    // POST - Tutor applies to a tuition
+    app.post("/applications", verifyFBToken, async (req, res) => {
+      const { tuitionPostId, qualifications, experience, expectedSalary } =
+        req.body;
+      const fbEmail = req.user.email;
+      const dbUser = await usersCollection.findOne({ email: fbEmail });
+
+      if (!dbUser || dbUser.role !== "tutor") {
+        return res.status(403).send({ error: "Only tutors can apply." });
+      }
+
+      if (!tuitionPostId || !qualifications || !experience || !expectedSalary) {
+        return res.status(400).send({ error: "Missing required fields" });
+      }
+
+      // Prevent duplicate application by the same tutor
+      const existing = await tuitionApplicationsCollection.findOne({
+        tuitionPostId,
+        tutorEmail: fbEmail,
+      });
+
+      if (existing) {
+        return res
+          .status(409)
+          .send({ error: "Already applied to this tuition." });
+      }
+
+      const newApplication = {
+        tuitionPostId,
+        tutorName: dbUser.name,
+        tutorEmail: dbUser.email,
+        qualifications,
+        experience,
+        expectedSalary: Number(expectedSalary),
+        status: "Pending",
+        createdAt: new Date(),
+      };
+
+      const result = await tuitionApplicationsCollection.insertOne(
+        newApplication
+      );
+      res.send(result);
+    });
+
+    // PATCH - Approve or Reject tutor application (Student performs this)
+    app.patch("/applications/:id", verifyFBToken, async (req, res) => {
+      const applicationId = req.params.id;
+      const { status } = req.body;
+      const query = { _id: new ObjectId(applicationId) };
+
+      const application = await tuitionApplicationsCollection.findOne(query);
+      if (!application) {
+        return res.status(404).send({ error: "Application not found" });
+      }
+
+      // Find the associated tuition post
+      const tuitionPostQuery = { _id: new ObjectId(application.tuitionPostId) };
+      const tuitionPost = await tuitionPostsCollection.findOne(
+        tuitionPostQuery
+      );
+
+      // Only the student who posted the tuition can approve/reject
+      const fbEmail = req.user.email;
+      if (tuitionPost.userEmail !== fbEmail) {
+        return res.status(403).send({ error: "Unauthorized action" });
+      }
+
+      const updatedDoc = {
+        $set: {
+          status,
+          updatedAt: new Date(),
+        },
+      };
+      const result = await tuitionApplicationsCollection.updateOne(
+        query,
+        updatedDoc
+      );
       res.send(result);
     });
 
