@@ -3,6 +3,7 @@ const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const app = express();
 require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const port = process.env.PORT || 5000;
 
 //firebase admin
@@ -456,30 +457,43 @@ async function run() {
     // GET all applications
     app.get("/applications", verifyFBToken, async (req, res) => {
       const studentEmail = req.query.studentEmail;
-      if (!studentEmail)
+
+      if (!studentEmail) {
         return res.status(400).send({ error: "studentEmail required" });
+      }
 
       try {
         const pipeline = [
+          // Match tuition posts created by this student
           { $match: { userEmail: studentEmail } },
 
+          // Lookup all tutor applications for each tuition post
           {
             $lookup: {
               from: "tuitionApplications",
-              localField: "_id",
-              foreignField: "tuitionPostId",
+              let: { postId: { $toString: "$_id" } }, // convert post _id → string
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $eq: ["$tuitionPostId", "$$postId"],
+                    },
+                  },
+                },
+              ],
               as: "applications",
             },
           },
 
           { $unwind: "$applications" },
 
+          // Build final structure
           {
             $project: {
               _id: "$applications._id",
               applicationCode: "$applications.applicationCode",
 
-              // tutor info
+              // Tutor info
               tutorName: "$applications.tutorName",
               tutorEmail: "$applications.tutorEmail",
               tutorPhoto: "$applications.tutorPhoto",
@@ -490,12 +504,22 @@ async function run() {
               status: "$applications.status",
               createdAt: "$applications.createdAt",
 
-              // tuition info
+              // Tuition info
               tuitionPostId: "$_id",
               tuitionCode: "$tuitionCode",
-              tuitionTitle: "$subject",
+              subject: "$subject",
+              tuitionTitle: {
+                $concat: [
+                  "$subject",
+                  " - Class: ",
+                  "$classLevel",
+                  " - ",
+                  "$location",
+                ],
+              },
               classLevel: "$classLevel",
               location: "$location",
+              studentEmail: "$userEmail",
             },
           },
 
@@ -505,8 +529,10 @@ async function run() {
         const result = await tuitionPostsCollection
           .aggregate(pipeline)
           .toArray();
+
         res.send(result);
       } catch (err) {
+        console.error(err);
         res.status(500).send({ error: "Server error" });
       }
     });
@@ -722,6 +748,99 @@ async function run() {
       const query = { _id: new ObjectId(appId) };
       const result = await tuitionApplicationsCollection.deleteOne(query);
       res.send(result);
+    });
+
+    /* =========================================================
+       PAYMENT Related APIs
+    ========================================================== */
+    // POST payment checkout session
+    app.post("/payment-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      console.log("inside the checkout-PaymentInfo:", paymentInfo);
+      const amount = parseInt(paymentInfo.expectedSalary) * 100;
+
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "BDT",
+              unit_amount: amount,
+              product_data: {
+                name: `Payment to "${paymentInfo.tutorName}" for Tuition: ${paymentInfo.tuitionTitle}`,
+              },
+            },
+            quantity: 1,
+          },
+        ],
+        customer_email: paymentInfo.studentEmail,
+        mode: "payment",
+        metadata: {
+          tuitionPostId: paymentInfo.tuitionPostId,
+          tutorEmail: paymentInfo.tutorEmail,
+        },
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      });
+      res.send({ url: session.url });
+    });
+
+    // PATCH
+    app.patch("/verify-payment-success", async (req, res) => {
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      if (session.payment_status === "paid") {
+        const id = session.metadata.tuitionPostId;
+        // 1. Update tuition post
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            status: "approved & paid",
+            paidAt: new Date(),
+          },
+        };
+        const tuitionUpdateResult = await tuitionPostsCollection.updateOne(
+          query,
+          updatedDoc
+        );
+        // 2. Update approved tutor application
+        const appQuery = {
+          tuitionPostId: id,
+          tutorEmail: session.metadata.tutorEmail,
+        };
+        const appUpdatedDoc = {
+          $set: {
+            status: "approved & paid",
+          },
+        };
+
+        const applicationUpdateResult =
+          await tuitionApplicationsCollection.updateOne(
+            appQuery,
+            appUpdatedDoc
+          );
+
+        // 3. Reject all other pending applications for the same tuition
+        const rejectOthersUpdate =
+          await tuitionApplicationsCollection.updateMany(
+            {
+              tuitionPostId: id,
+              status: "pending",
+              tutorEmail: { $ne: session.metadata.tutorEmail }, // avoid rejecting approved one
+            },
+            {
+              $set: { status: "rejected" },
+            }
+          );
+
+        return res.send({
+          success: true,
+          message: "Payment verified, application approved, others rejected.",
+          tuitionUpdateResult,
+          applicationUpdateResult,
+          rejectOthersUpdate,
+        });
+      }
+      res.send({ success: false });
     });
 
     // Send a ping to confirm a successful connection
