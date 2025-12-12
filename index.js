@@ -3,7 +3,7 @@ const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const app = express();
 require("dotenv").config();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 
 //firebase admin
 const admin = require("firebase-admin");
@@ -62,17 +62,6 @@ const client = new MongoClient(uri, {
   },
 });
 
-// Code generator
-const getNextCode = async (name, prefix) => {
-  const counter = await countersCollection.findOneAndUpdate(
-    { name },
-    { $inc: { value: 1 } },
-    { upsert: true, returnDocument: "after" }
-  );
-
-  return `${prefix}-${counter.value}`;
-};
-
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
@@ -85,15 +74,47 @@ async function run() {
     const tuitionApplicationsCollection = db.collection("tuitionApplications");
     const countersCollection = db.collection("counters");
 
+    // Ensure unique indexes at server startup
+    await tuitionPostsCollection.createIndex(
+      { tuitionCode: 1 },
+      { unique: true }
+    );
+    await tuitionApplicationsCollection.createIndex(
+      { applicationCode: 1 },
+      { unique: true }
+    );
+
     // Code generator
     const getNextCode = async (name, prefix) => {
-      const counter = await countersCollection.findOneAndUpdate(
-        { name },
-        { $inc: { value: 1 } },
-        { upsert: true, returnDocument: "after" }
-      );
+      let counter;
+      let codeExists = true;
+      let nextValue;
 
-      return `${prefix}-${counter.value}`;
+      while (codeExists) {
+        // Increment counter
+        counter = await countersCollection.findOneAndUpdate(
+          { name },
+          { $inc: { value: 1 } },
+          { upsert: true, returnDocument: "after" }
+        );
+
+        nextValue = counter.value;
+        const newCode = `${prefix}-${nextValue}`;
+
+        // Check both collections for duplicates
+        const existingPost = await tuitionPostsCollection.findOne({
+          tuitionCode: newCode,
+        });
+        const existingApplication = await tuitionApplicationsCollection.findOne(
+          { applicationCode: newCode }
+        );
+
+        if (!existingPost && !existingApplication) {
+          codeExists = false;
+        }
+      }
+
+      return `${prefix}-${nextValue}`;
     };
 
     /* =========================================================
@@ -276,49 +297,64 @@ async function run() {
       res.send(result);
     });
 
-    // POST/ Create a tuition post
+    // POST /tuition-posts - Create Tuition Post
     app.post("/tuition-posts", verifyFBToken, async (req, res) => {
-      const {
-        subject,
-        classLevel,
-        location,
-        budget,
-        schedule,
-        description,
-        contactEmail,
-      } = req.body;
+      try {
+        const {
+          subject,
+          classLevel,
+          location,
+          budget,
+          schedule,
+          description,
+          contactEmail,
+        } = req.body;
 
-      if (
-        !subject ||
-        !classLevel ||
-        !location ||
-        !budget ||
-        !contactEmail ||
-        !description
-      ) {
-        return res.status(400).send({ error: "Missing required fields" });
+        if (
+          !subject ||
+          !classLevel ||
+          !location ||
+          !budget ||
+          !contactEmail ||
+          !description
+        ) {
+          return res.status(400).send({ error: "Missing required fields" });
+        }
+
+        const fbEmail = req.user.email;
+        const dbUser = await usersCollection.findOne({ email: fbEmail });
+
+        const newPost = {
+          tuitionCode: await getNextCode("tuitionCode", "TP"),
+          studentName: dbUser?.name || "Unknown",
+          userEmail: fbEmail,
+          subject,
+          classLevel,
+          location,
+          budget: Number(budget),
+          schedule: schedule || "",
+          description,
+          contactEmail,
+          status: "approved", // later use "Pending" for admin flow
+          createdAt: new Date(),
+        };
+
+        const result = await tuitionPostsCollection.insertOne(newPost);
+        res.send({
+          success: true,
+          insertedId: result.insertedId,
+          tuitionCode: newPost.tuitionCode,
+        });
+      } catch (err) {
+        if (err.code === 11000) {
+          // Mongo duplicate key error
+          return res
+            .status(409)
+            .send({ error: "Duplicate tuition code, please try again" });
+        }
+        console.error(err);
+        res.status(500).send({ error: "Internal server error" });
       }
-
-      const fbEmail = req.user.email;
-      const dbUser = await usersCollection.findOne({ email: fbEmail });
-
-      const newPost = {
-        tuitionCode: await getNextCode("tuitionCode", "TP"),
-        studentName: dbUser?.name || "Unknown",
-        userEmail: fbEmail,
-        subject,
-        classLevel,
-        location,
-        budget: Number(budget),
-        schedule: schedule || "",
-        description,
-        contactEmail,
-        status: "approved", // later use "Pending" for admin flow
-        createdAt: new Date(),
-      };
-
-      const result = await tuitionPostsCollection.insertOne(newPost);
-      res.send(result);
     });
 
     // PATCH/edit tuition posts
@@ -515,63 +551,73 @@ async function run() {
       }
     );
 
-    // POST - Tutor applies to a tuition
+    // POST /applications - Create Tutor Application
     app.post("/applications", verifyFBToken, async (req, res) => {
-      const { tuitionPostId, qualifications, experience, expectedSalary } =
-        req.body;
-
-      const fbEmail = req.user.email;
-      const dbUser = await usersCollection.findOne({ email: fbEmail });
-
-      if (!dbUser || dbUser.role !== "tutor")
-        return res.status(403).send({ error: "Only tutors can apply" });
-
-      if (!tuitionPostId || !qualifications || !experience || !expectedSalary)
-        return res.status(400).send({ error: "Missing required fields" });
-
-      let tuitionPostObjectId;
       try {
-        tuitionPostObjectId = new ObjectId(tuitionPostId);
-      } catch {
-        return res.status(400).send({ error: "Invalid tuitionPostId" });
+        const { tuitionPostId, qualifications, experience, expectedSalary } =
+          req.body;
+
+        const fbEmail = req.user.email;
+        const dbUser = await usersCollection.findOne({ email: fbEmail });
+
+        if (!dbUser || dbUser.role !== "tutor")
+          return res.status(403).send({ error: "Only tutors can apply" });
+
+        if (!tuitionPostId || !qualifications || !experience || !expectedSalary)
+          return res.status(400).send({ error: "Missing required fields" });
+
+        let tuitionPostObjectId;
+        try {
+          tuitionPostObjectId = new ObjectId(tuitionPostId);
+        } catch {
+          return res.status(400).send({ error: "Invalid tuitionPostId" });
+        }
+
+        // Prevent duplicate application
+        const exists = await tuitionApplicationsCollection.findOne({
+          tuitionPostId: tuitionPostObjectId,
+          tutorEmail: fbEmail,
+        });
+        if (exists)
+          return res
+            .status(409)
+            .send({ error: "Already applied to this tuition" });
+
+        const appCode = await getNextCode("applicationCode", "TA");
+
+        const newApplication = {
+          applicationCode: appCode,
+          tuitionPostId: tuitionPostObjectId,
+          tutorName: dbUser.name,
+          tutorEmail: dbUser.email,
+          tutorPhoto: dbUser.photoURL || null,
+          qualifications,
+          experience,
+          expectedSalary: Number(expectedSalary),
+          status: "pending",
+          createdAt: new Date(),
+        };
+
+        const result = await tuitionApplicationsCollection.insertOne(
+          newApplication
+        );
+
+        res.send({
+          success: true,
+          message: "Application submitted successfully",
+          applicationId: result.insertedId,
+          applicationCode: appCode,
+        });
+      } catch (err) {
+        if (err.code === 11000) {
+          // Mongo duplicate key error
+          return res
+            .status(409)
+            .send({ error: "Duplicate application code, please try again" });
+        }
+        console.error(err);
+        res.status(500).send({ error: "Internal server error" });
       }
-
-      // Prevent duplicate apply
-      const exists = await tuitionApplicationsCollection.findOne({
-        tuitionPostId: tuitionPostObjectId,
-        tutorEmail: fbEmail,
-      });
-
-      if (exists)
-        return res
-          .status(409)
-          .send({ error: "Already applied to this tuition" });
-
-      const appCode = await getNextCode("applicationCode", "TA");
-
-      const newApplication = {
-        applicationCode: appCode,
-        tuitionPostId: tuitionPostObjectId,
-        tutorName: dbUser.name,
-        tutorEmail: dbUser.email,
-        tutorPhoto: dbUser.photoURL || null,
-        qualifications,
-        experience,
-        expectedSalary: Number(expectedSalary),
-        status: "pending",
-        createdAt: new Date(),
-      };
-
-      const result = await tuitionApplicationsCollection.insertOne(
-        newApplication
-      );
-
-      res.send({
-        success: true,
-        message: "Application submitted successfully",
-        applicationId: result.insertedId,
-        applicationCode: appCode,
-      });
     });
 
     // PATCH - Approve or Reject tutor application (Student performs this)
