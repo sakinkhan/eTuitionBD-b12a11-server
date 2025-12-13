@@ -264,6 +264,7 @@ async function run() {
             { location: { $regex: search, $options: "i" } },
             { studentName: { $regex: search, $options: "i" } },
             { description: { $regex: search, $options: "i" } },
+            { tuitionCode: { $regex: search, $options: "i" } },
           ];
         }
         const cursor = tuitionPostsCollection
@@ -456,12 +457,7 @@ async function run() {
     ========================================================== */
     // GET all applications
     app.get("/applications", verifyFBToken, async (req, res) => {
-      const studentEmail = req.query.studentEmail;
-
-      if (!studentEmail) {
-        return res.status(400).send({ error: "studentEmail required" });
-      }
-
+      const studentEmail = req.user.email;
       try {
         const pipeline = [
           // Match tuition posts created by this student
@@ -471,7 +467,7 @@ async function run() {
           {
             $lookup: {
               from: "tuitionApplications",
-              let: { postId: { $toString: "$_id" } }, // convert post _id → string
+              let: { postId: "$_id" }, // convert post _id → string
               pipeline: [
                 {
                   $match: {
@@ -548,32 +544,48 @@ async function run() {
           return res.status(401).send({ error: "Unauthorized" });
         }
 
-        const result = await tuitionApplicationsCollection
-          .aggregate([
-            {
-              $match: { tutorEmail: fbEmail },
-            },
-            // JOIN tuition post data
-            {
-              $lookup: {
-                from: "tuitionPosts", // collection name
-                localField: "tuitionPostId", // field in applications
-                foreignField: "_id", // field in tuitionPosts
-                as: "tuitionPost",
+        try {
+          const result = await tuitionApplicationsCollection
+            .aggregate([
+              // 1. Tutor's applications
+              {
+                $match: { tutorEmail: fbEmail },
               },
-            },
-            {
-              $unwind: {
-                path: "$tuitionPost",
-                preserveNullAndEmptyArrays: true,
+
+              // 2. Lookup tuition post (convert _id → string)
+              {
+                $lookup: {
+                  from: "tuitionPosts",
+                  let: { postId: { $toObjectId: "$tuitionPostId" } },
+                  pipeline: [
+                    {
+                      $match: {
+                        $expr: {
+                          $eq: ["$_id", { $toObjectId: "$$postId" }],
+                        },
+                      },
+                    },
+                  ],
+                  as: "tuitionPost",
+                },
               },
-            },
-            {
-              $sort: { createdAt: -1 },
-            },
-          ])
-          .toArray();
-        res.send(result);
+
+              {
+                $unwind: {
+                  path: "$tuitionPost",
+                  preserveNullAndEmptyArrays: true,
+                },
+              },
+
+              { $sort: { createdAt: -1 } },
+            ])
+            .toArray();
+
+          res.send(result);
+        } catch (err) {
+          console.error(err);
+          res.status(500).send({ error: "Server error" });
+        }
       }
     );
 
