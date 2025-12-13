@@ -458,6 +458,7 @@ async function run() {
     // GET all applications
     app.get("/applications", verifyFBToken, async (req, res) => {
       const studentEmail = req.user.email;
+
       try {
         const pipeline = [
           // Match tuition posts created by this student
@@ -467,16 +468,8 @@ async function run() {
           {
             $lookup: {
               from: "tuitionApplications",
-              let: { postId: "$_id" }, // convert post _id → string
-              pipeline: [
-                {
-                  $match: {
-                    $expr: {
-                      $eq: ["$tuitionPostId", "$$postId"],
-                    },
-                  },
-                },
-              ],
+              localField: "_id",
+              foreignField: "tuitionPostId",
               as: "applications",
             },
           },
@@ -596,11 +589,12 @@ async function run() {
           req.body;
 
         const fbEmail = req.user.email;
+        // Verify tutor
         const dbUser = await usersCollection.findOne({ email: fbEmail });
-
         if (!dbUser || dbUser.role !== "tutor")
           return res.status(403).send({ error: "Only tutors can apply" });
 
+        // Validate fields
         if (!tuitionPostId || !qualifications || !experience || !expectedSalary)
           return res.status(400).send({ error: "Missing required fields" });
 
