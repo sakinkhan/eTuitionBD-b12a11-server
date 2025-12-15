@@ -74,6 +74,7 @@ async function run() {
     const tuitionPostsCollection = db.collection("tuitionPosts");
     const tuitionApplicationsCollection = db.collection("tuitionApplications");
     const countersCollection = db.collection("counters");
+    const paymentCollection = db.collection("payments");
 
     // Ensure unique indexes at server startup
     await tuitionPostsCollection.createIndex(
@@ -729,6 +730,29 @@ async function run() {
       }
     );
 
+    //PATCH - Reject applications by students
+    app.patch("/applications/reject/:id", verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const appQuery = { _id: new ObjectId(id), status: "pending" };
+      const updatedFields = {
+        $set: {
+          status: "rejected",
+          rejectedAt: new Date(),
+        },
+      };
+      const result = await tuitionApplicationsCollection.updateOne(
+        appQuery,
+        updatedFields
+      );
+      if (result.matchedCount === 0) {
+        return res.status(404).send({
+          success: false,
+          message: "Application not found or already processed",
+        });
+      }
+      res.send(result);
+    });
+
     // DELETE - Tutor Deletes their own application
     app.delete("/applications/:id", verifyFBToken, async (req, res) => {
       const appId = req.params.id;
@@ -762,7 +786,7 @@ async function run() {
     // POST payment checkout session
     app.post("/payment-checkout-session", async (req, res) => {
       const paymentInfo = req.body;
-      console.log("inside the checkout-PaymentInfo:", paymentInfo);
+      // console.log("inside the checkout-PaymentInfo:", paymentInfo);
       const amount = parseInt(paymentInfo.expectedSalary) * 100;
 
       const session = await stripe.checkout.sessions.create({
@@ -783,6 +807,8 @@ async function run() {
         metadata: {
           tuitionPostId: paymentInfo.tuitionPostId,
           tutorEmail: paymentInfo.tutorEmail,
+          tuitionCode: paymentInfo.tuitionCode,
+          tuitionTitle: paymentInfo.tuitionTitle,
         },
         success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
@@ -790,63 +816,139 @@ async function run() {
       res.send({ url: session.url });
     });
 
-    // PATCH
+    // PATCH Verify Payment Success
     app.patch("/verify-payment-success", async (req, res) => {
-      const sessionId = req.query.session_id;
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
-      if (session.payment_status === "paid") {
-        const id = session.metadata.tuitionPostId;
-        // 1. Update tuition post
-        const query = { _id: new ObjectId(id) };
-        const updatedDoc = {
-          $set: {
-            status: "approved & paid",
-            paidAt: new Date(),
-          },
-        };
-        const tuitionUpdateResult = await tuitionPostsCollection.updateOne(
-          query,
-          updatedDoc
-        );
-        // 2. Update approved tutor application
-        const appQuery = {
-          tuitionPostId: id,
-          tutorEmail: session.metadata.tutorEmail,
-        };
-        const appUpdatedDoc = {
-          $set: {
-            status: "approved & paid",
-          },
-        };
+      try {
+        const sessionId = req.query.session_id;
+        if (!sessionId) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Missing session_id" });
+        }
 
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status !== "paid") {
+          return res.send({
+            success: false,
+            message: "Payment not completed",
+          });
+        }
+
+        const { tuitionPostId, tutorEmail, tuitionTitle, tuitionCode } =
+          session.metadata || {};
+
+        if (!tuitionPostId || !tutorEmail) {
+          return res
+            .status(400)
+            .send({ success: false, message: "Invalid session metadata" });
+        }
+
+        const tuitionPostObjectId = new ObjectId(tuitionPostId);
+        const paidAt = new Date();
+
+        /* -------------------- 1. Update tuition post -------------------- */
+        const tuitionUpdateResult = await tuitionPostsCollection.updateOne(
+          { _id: tuitionPostObjectId },
+          {
+            $set: {
+              status: "approved & paid",
+              paidAt,
+            },
+          }
+        );
+
+        /* -------------------- 2. Approve selected tutor -------------------- */
         const applicationUpdateResult =
           await tuitionApplicationsCollection.updateOne(
-            appQuery,
-            appUpdatedDoc
+            {
+              tuitionPostId: tuitionPostObjectId,
+              tutorEmail,
+            },
+            {
+              $set: { status: "approved & paid" },
+            }
           );
 
-        // 3. Reject all other pending applications for the same tuition
+        /* -------------------- 3. Reject other pending tutors -------------------- */
         const rejectOthersUpdate =
           await tuitionApplicationsCollection.updateMany(
             {
-              tuitionPostId: id,
+              tuitionPostId: tuitionPostObjectId,
               status: "pending",
-              tutorEmail: { $ne: session.metadata.tutorEmail }, // avoid rejecting approved one
+              tutorEmail: { $ne: tutorEmail },
             },
             {
               $set: { status: "rejected" },
             }
           );
 
+        /* -------------------- 4. Save payment history -------------------- */
+        const fullTransactionId = session.payment_intent;
+        const displayTransactionId = `ETB-${fullTransactionId
+          .slice(-8)
+          .toUpperCase()}`;
+
+        const existingPayment = await paymentCollection.findOne({
+          transactionId: fullTransactionId,
+        });
+
+        let paymentResult = null;
+
+        if (!existingPayment) {
+          paymentResult = await paymentCollection.insertOne({
+            tuitionPostId: tuitionPostObjectId,
+            tuitionTitle: tuitionTitle || null,
+            tuitionCode: tuitionCode || null,
+
+            tutorEmail,
+            customer_email: session.customer_email,
+
+            amount: session.amount_total / 100,
+            currency: session.currency,
+
+            transactionId: fullTransactionId, 
+            displayTransactionId,
+            paymentStatus: session.payment_status,
+
+            paidAt,
+            createdAt: paidAt,
+          });
+        }
+
         return res.send({
           success: true,
-          message: "Payment verified, application approved, others rejected.",
+          message: "Payment verified, tutor approved, others rejected.",
           tuitionUpdateResult,
           applicationUpdateResult,
           rejectOthersUpdate,
+          paymentResult,
         });
+      } catch (error) {
+        console.error("Verify payment error:", error);
+        res
+          .status(500)
+          .send({ success: false, message: "Internal server error" });
       }
-      res.send({ success: false });
+    });
+
+    // GET payments for Payment History
+    app.get("/payments", verifyFBToken, async (req, res) => {
+      try {
+        // const email = req.user.email;
+        const fbEmail = req.user?.email;
+        console.log("in the payments get api", fbEmail);
+
+        const payments = await paymentCollection
+          .find({ customer_email: fbEmail })
+          .sort({ paidAt: -1 })
+          .toArray();
+
+        res.send(payments);
+      } catch (error) {
+        console.error("Fetch payment history error:", error);
+        res.status(500).send({ message: "Failed to fetch payment history" });
+      }
     });
 
     // Send a ping to confirm a successful connection
