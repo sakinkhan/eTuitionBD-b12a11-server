@@ -131,6 +131,7 @@ async function run() {
         query.$or = [
           { displayName: { $regex: searchText, $options: "i" } },
           { email: { $regex: searchText, $options: "i" } },
+          { role: { $regex: searchText, $options: "i" } },
         ];
       }
 
@@ -171,19 +172,17 @@ async function run() {
     // create/POST a new user
     app.post("/users", async (req, res) => {
       const user = req.body;
-
-      // Ensure role exists
-      if (!user.role) {
-        return res.status(400).send({ error: "Role is required" });
+      // Check if user already exists
+      const existingUser = await usersCollection.findOne({ email: user.email });
+      if (existingUser) {
+        return res.status(200).send(existingUser);
       }
-
-      // Prevent duplicate email entry
-      const exists = await usersCollection.findOne({ email: user.email });
-      if (exists) {
-        return res.status(409).send({ error: "User already exists" });
-      }
-
-      const result = await usersCollection.insertOne(user);
+      const newUser = {
+        ...user,
+        role: user.role || "student",
+        createdAt: new Date(),
+      };
+      const result = await usersCollection.insertOne(newUser);
       res.send(result);
     });
 
@@ -197,7 +196,15 @@ async function run() {
       if (!userToUpdate)
         return res.status(404).send({ message: "User not found" });
 
-      const requesterIsAdmin = req.user.isAdmin;
+      const requester = await usersCollection.findOne({
+        email: req.user.email,
+      });
+
+      if (!requester) {
+        return res.status(401).send({ message: "Unauthorized" });
+      }
+
+      const requesterIsAdmin = requester.isAdmin === true;
       const isSelf = req.user.email === userToUpdate.email;
 
       // Non-admin cannot update others
@@ -289,6 +296,7 @@ async function run() {
             { studentName: { $regex: search, $options: "i" } },
             { description: { $regex: search, $options: "i" } },
             { tuitionCode: { $regex: search, $options: "i" } },
+            { contactEmail: { $regex: search, $options: "i" } },
           ];
         }
         const cursor = tuitionPostsCollection
