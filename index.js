@@ -188,30 +188,53 @@ async function run() {
     });
 
     // PATCH / Update user info:
-    app.patch(
-      "/users/:id",
-      verifyFBToken,
-      verifyAdmin(usersCollection),
-      async (req, res) => {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
+    app.patch("/users/:id", verifyFBToken, async (req, res) => {
+      const id = req.params.id;
+      const { name, phone, role, photoURL, verified, isAdmin } = req.body;
 
-        const { name, phone, role, photoURL, verified } = req.body;
+      const query = { _id: new ObjectId(id) };
+      const userToUpdate = await usersCollection.findOne(query);
+      if (!userToUpdate)
+        return res.status(404).send({ message: "User not found" });
 
-        const updateFields = {};
-        if (name) updateFields.name = name;
-        if (phone) updateFields.phone = phone;
-        if (photoURL) updateFields.photoURL = photoURL;
+      const requesterIsAdmin = req.user.isAdmin;
+      const isSelf = req.user.email === userToUpdate.email;
+
+      // Non-admin cannot update others
+      if (!requesterIsAdmin && !isSelf) {
+        return res
+          .status(403)
+          .send({ message: "Forbidden: cannot update other users" });
+      }
+
+      const updateFields = {};
+
+      // Everyone (admin or self) can update their basic info
+      if (name) updateFields.name = name;
+      if (phone) updateFields.phone = phone;
+      if (photoURL) updateFields.photoURL = photoURL;
+
+      // Admin-only fields
+      if (requesterIsAdmin) {
+        if (typeof isAdmin === "boolean") updateFields.isAdmin = isAdmin;
         if (role) updateFields.role = role;
         if (typeof verified === "boolean") updateFields.verified = verified;
-
-        const result = await usersCollection.updateOne(query, {
-          $set: updateFields,
-        });
-
-        res.send(result);
+      } else {
+        // Block non-admin from updating admin-only fields
+        if (
+          typeof isAdmin !== "undefined" ||
+          typeof verified !== "undefined" ||
+          role
+        ) {
+          return res.status(403).send({ message: "Forbidden: admin only" });
+        }
       }
-    );
+
+      const result = await usersCollection.updateOne(query, {
+        $set: updateFields,
+      });
+      res.send(result);
+    });
 
     // PATCH/ Update user role
     app.patch(
@@ -458,14 +481,15 @@ async function run() {
     ========================================================== */
     // GET all applications
     app.get("/applications", verifyFBToken, async (req, res) => {
-      const studentEmail = req.user.email;
-
       try {
+        const studentEmail = req.user.email;
+        const search = req.query.search?.trim();
+
         const pipeline = [
-          // Match tuition posts created by this student
+          // 1. Only this student's tuition posts
           { $match: { userEmail: studentEmail } },
 
-          // Lookup all tutor applications for each tuition post
+          // 2. Join tutor applications
           {
             $lookup: {
               from: "tuitionApplications",
@@ -477,13 +501,12 @@ async function run() {
 
           { $unwind: "$applications" },
 
-          // Build final structure
+          // 3. Shape final output
           {
             $project: {
               _id: "$applications._id",
               applicationCode: "$applications.applicationCode",
 
-              // Tutor info
               tutorName: "$applications.tutorName",
               tutorEmail: "$applications.tutorEmail",
               tutorPhoto: "$applications.tutorPhoto",
@@ -494,10 +517,11 @@ async function run() {
               status: "$applications.status",
               createdAt: "$applications.createdAt",
 
-              // Tuition info
               tuitionPostId: "$_id",
               tuitionCode: "$tuitionCode",
               subject: "$subject",
+              classLevel: "$classLevel",
+              location: "$location",
               tuitionTitle: {
                 $concat: [
                   "$subject",
@@ -507,12 +531,26 @@ async function run() {
                   "$location",
                 ],
               },
-              classLevel: "$classLevel",
-              location: "$location",
               studentEmail: "$userEmail",
             },
           },
 
+          // 4. Search filter
+          ...(search
+            ? [
+                {
+                  $match: {
+                    $or: [
+                      { tutorName: { $regex: search, $options: "i" } },
+                      { tuitionCode: { $regex: search, $options: "i" } },
+                      { status: { $regex: search, $options: "i" } },
+                    ],
+                  },
+                },
+              ]
+            : []),
+
+          // 5. Sort
           { $sort: { createdAt: -1 } },
         ];
 
@@ -532,47 +570,88 @@ async function run() {
       "/applications/my-applications",
       verifyFBToken,
       async (req, res) => {
-        const fbEmail = req.user?.email;
-
-        if (!fbEmail) {
-          return res.status(401).send({ error: "Unauthorized" });
-        }
-
         try {
-          const result = await tuitionApplicationsCollection
-            .aggregate([
-              // 1. Tutor's applications
-              {
-                $match: { tutorEmail: fbEmail },
-              },
+          const tutorEmail = req.user.email;
+          const search = req.query.search?.trim();
 
-              // 2. Lookup tuition post (convert _id → string)
-              {
-                $lookup: {
-                  from: "tuitionPosts",
-                  let: { postId: { $toObjectId: "$tuitionPostId" } },
-                  pipeline: [
-                    {
-                      $match: {
-                        $expr: {
-                          $eq: ["$_id", { $toObjectId: "$$postId" }],
-                        },
-                      },
-                    },
+          const pipeline = [
+            // 1. Only this tutor's applications
+            {
+              $match: { tutorEmail },
+            },
+
+            // 2. Join tuition post
+            {
+              $lookup: {
+                from: "tuitionPosts",
+                localField: "tuitionPostId",
+                foreignField: "_id",
+                as: "tuitionPost",
+              },
+            },
+
+            {
+              $unwind: {
+                path: "$tuitionPost",
+                preserveNullAndEmptyArrays: true,
+              },
+            },
+
+            // 3. response structure
+            {
+              $project: {
+                _id: 1,
+                applicationCode: 1,
+                tutorEmail: 1,
+                tutorName: 1,
+                tutorPhoto: 1,
+                qualifications: 1,
+                experience: 1,
+                expectedSalary: 1,
+                status: 1,
+                createdAt: 1,
+
+                tuitionPostId: "$tuitionPost._id",
+                tuitionCode: "$tuitionPost.tuitionCode",
+                subject: "$tuitionPost.subject",
+                classLevel: "$tuitionPost.classLevel",
+                location: "$tuitionPost.location",
+                budget: "$tuitionPost.budget",
+                studentEmail: "$tuitionPost.userEmail",
+                tuitionTitle: {
+                  $concat: [
+                    "$tuitionPost.subject",
+                    " - Class: ",
+                    "$tuitionPost.classLevel",
+                    " - ",
+                    "$tuitionPost.location",
                   ],
-                  as: "tuitionPost",
                 },
               },
+            },
 
-              {
-                $unwind: {
-                  path: "$tuitionPost",
-                  preserveNullAndEmptyArrays: true,
-                },
-              },
+            // 4. Search filter
+            ...(search
+              ? [
+                  {
+                    $match: {
+                      $or: [
+                        { applicationCode: { $regex: search, $options: "i" } },
+                        { subject: { $regex: search, $options: "i" } },
+                        { status: { $regex: search, $options: "i" } },
+                        { location: { $regex: search, $options: "i" } },
+                      ],
+                    },
+                  },
+                ]
+              : []),
 
-              { $sort: { createdAt: -1 } },
-            ])
+            // 5. sort latest first by default
+            { $sort: { createdAt: -1 } },
+          ];
+
+          const result = await tuitionApplicationsCollection
+            .aggregate(pipeline)
             .toArray();
 
           res.send(result);
@@ -907,7 +986,7 @@ async function run() {
             amount: session.amount_total / 100,
             currency: session.currency,
 
-            transactionId: fullTransactionId, 
+            transactionId: fullTransactionId,
             displayTransactionId,
             paymentStatus: session.payment_status,
 
@@ -949,6 +1028,108 @@ async function run() {
         console.error("Fetch payment history error:", error);
         res.status(500).send({ message: "Failed to fetch payment history" });
       }
+    });
+
+    // //GET tutor ongoing tuitions
+    // app.get("/tutor/ongoing-tuitions", verifyFBToken, async (req, res) => {
+    //   const tutorEmail = req.user.email;
+    //   const query = {
+    //     tutorEmail: tutorEmail,
+    //     status: "approved & paid",
+    //   };
+    //   const cursor = tuitionApplicationsCollection
+    //     .find(query)
+    //     .sort({ createdAt: -1 });
+    //   const result = await cursor.toArray();
+    //   res.send(result);
+    // });
+
+    // GET tutor ongoing tuitions
+    app.get("/tutor/ongoing-tuitions", verifyFBToken, async (req, res) => {
+      const tutorEmail = req.user.email;
+      const cursor = tuitionApplicationsCollection.aggregate([
+        // 1. match tutor + status: approved & paid
+        {
+          $match: {
+            tutorEmail: tutorEmail,
+            status: "approved & paid",
+          },
+        },
+        // 2. join with payments collection
+        {
+          $lookup: {
+            from: "payments",
+            localField: "tuitionPostId",
+            foreignField: "tuitionPostId",
+            as: "payment",
+          },
+        },
+        // 3. unwind payment array
+        {
+          $unwind: {
+            path: "$payment",
+            preserveNullAndEmptyArrays: false,
+          },
+        },
+        // 4. ensure payment is paid
+        {
+          $match: {
+            "payment.paymentStatus": "paid",
+          },
+        },
+        // 5. Join with users collection to get student info
+        {
+          $lookup: {
+            from: "users",
+            localField: "payment.customer_email",
+            foreignField: "email",
+            as: "student",
+          },
+        },
+        // 6. unwind student array
+        {
+          $unwind: {
+            path: "$student",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+
+        // 5. final response structure
+        {
+          $project: {
+            _id: 1,
+            applicationCode: 1,
+            tuitionPostId: 1,
+            status: 1,
+            createdAt: 1,
+            // from payments
+            tuitionTitle: "$payment.tuitionTitle",
+            salary: "$payment.amount",
+            // from students
+            studentName: "$student.name",
+            studentEmail: "$student.email",
+            studentPhone: "$student.phone",
+          },
+        },
+        // 6️. Sort newest first
+        {
+          $sort: { createdAt: -1 },
+        },
+      ]);
+      const ongoingTuitionsResult = await cursor.toArray();
+      res.send(ongoingTuitionsResult);
+    });
+
+    // GET Tutor revenue history
+    app.get("/tutor/revenue", verifyFBToken, async (req, res) => {
+      const tutorEmail = req.user.email;
+      const query = {
+        tutorEmail: tutorEmail,
+        paymentStatus: "paid",
+      };
+      const cursor = paymentCollection.find(query).sort({ paidAt: -1 });
+      const result = await cursor.toArray();
+      res.send(result);
     });
 
     // Send a ping to confirm a successful connection
