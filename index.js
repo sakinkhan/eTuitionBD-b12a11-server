@@ -297,6 +297,7 @@ async function run() {
             { description: { $regex: search, $options: "i" } },
             { tuitionCode: { $regex: search, $options: "i" } },
             { contactEmail: { $regex: search, $options: "i" } },
+            { status: { $regex: search, $options: "i" } },
           ];
         }
         const cursor = tuitionPostsCollection
@@ -369,7 +370,7 @@ async function run() {
           schedule: schedule || "",
           description,
           contactEmail,
-          status: "approved", // later use "Pending" for admin flow
+          status: "pending",
           createdAt: new Date(),
         };
 
@@ -395,6 +396,7 @@ async function run() {
     app.patch("/tuition-posts/:id", verifyFBToken, async (req, res) => {
       const id = req.params.id;
       const fbEmail = req.user?.email;
+      console.log("User details", req.user.isAdmin);
 
       if (!fbEmail)
         return res.status(400).send({ error: "Invalid authentication" });
@@ -423,6 +425,7 @@ async function run() {
         schedule,
         description,
         contactEmail,
+        status,
       } = req.body;
 
       const updatedFields = {};
@@ -434,19 +437,63 @@ async function run() {
       if (schedule !== undefined) updatedFields.schedule = schedule.trim();
       if (description) updatedFields.description = description.trim();
       if (contactEmail) updatedFields.contactEmail = contactEmail.trim();
+      if (status && ["approved", "rejected"].includes(status)) {
+        updatedFields.status = status;
+      }
+
       updatedFields.updatedAt = new Date();
 
       const result = await tuitionPostsCollection.findOneAndUpdate(
         { _id: postId },
         { $set: updatedFields },
-        { returnDocument: "after" } // Return the updated document
+        { returnDocument: "after" }
       );
-
       res.send({
         message: "Tuition post updated successfully",
         updatedPost: result.value,
       });
     });
+    // PATCH /tuition-posts/admin/:id
+    // Only admins can access
+    app.patch(
+      "/tuition-posts/admin/:id",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        const { id } = req.params;
+
+        let postId;
+        try {
+          postId = new ObjectId(id);
+        } catch {
+          return res.status(400).send({ error: "Invalid tuition post ID" });
+        }
+
+        const existingPost = await tuitionPostsCollection.findOne({
+          _id: postId,
+        });
+        if (!existingPost)
+          return res.status(404).send({ error: "Tuition post not found" });
+
+        const { status } = req.body;
+        if (!status || !["approved", "rejected"].includes(status)) {
+          return res.status(400).send({
+            error: "Invalid status. Must be 'approved' or 'rejected'.",
+          });
+        }
+
+        const result = await tuitionPostsCollection.findOneAndUpdate(
+          { _id: postId },
+          { $set: { status, updatedAt: new Date() } },
+          { returnDocument: "after" }
+        );
+
+        res.send({
+          message: `Tuition post ${status} successfully`,
+          updatedPost: result.value,
+        });
+      }
+    );
 
     // DELETE tuition posts
     app.delete("/tuition-posts/:id", verifyFBToken, async (req, res) => {
