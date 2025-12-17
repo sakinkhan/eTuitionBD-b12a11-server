@@ -562,6 +562,7 @@ async function run() {
               _id: "$applications._id",
               applicationCode: "$applications.applicationCode",
 
+              tutorId: "$applications.tutorId",
               tutorName: "$applications.tutorName",
               tutorEmail: "$applications.tutorEmail",
               tutorPhoto: "$applications.tutorPhoto",
@@ -743,7 +744,7 @@ async function run() {
         // Prevent duplicate application
         const exists = await tuitionApplicationsCollection.findOne({
           tuitionPostId: tuitionPostObjectId,
-          tutorEmail: fbEmail,
+          tutorId: dbUser._id,
         });
         if (exists)
           return res
@@ -755,6 +756,7 @@ async function run() {
         const newApplication = {
           applicationCode: appCode,
           tuitionPostId: tuitionPostObjectId,
+          tutorId: dbUser._id,
           tutorName: dbUser.name,
           tutorEmail: dbUser.email,
           tutorPhoto: dbUser.photoURL || null,
@@ -918,39 +920,50 @@ async function run() {
        PAYMENT Related APIs
     ========================================================== */
     // POST payment checkout session
-    app.post("/payment-checkout-session", async (req, res) => {
-      const paymentInfo = req.body;
-      // console.log("inside the checkout-PaymentInfo:", paymentInfo);
-      const amount = parseInt(paymentInfo.expectedSalary) * 100;
+    app.post("/payment-checkout-session", verifyFBToken, async (req, res) => {
+      try {
+        const paymentInfo = req.body;
+        console.log("inside the checkout-PaymentInfo:", paymentInfo);
+        const amount = Number(paymentInfo.expectedSalary) * 100;
+        const studentEmail = req.user.email;
 
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "BDT",
-              unit_amount: amount,
-              product_data: {
-                name: `Payment to "${paymentInfo.tutorName}" for Tuition: ${paymentInfo.tuitionTitle}`,
+        const session = await stripe.checkout.sessions.create({
+          line_items: [
+            {
+              price_data: {
+                currency: "BDT",
+                unit_amount: amount,
+                product_data: {
+                  name: `Payment to Tutor: ${paymentInfo.tutorName} for Tuition: ${paymentInfo.tuitionTitle}`,
+                },
               },
+              quantity: 1,
             },
-            quantity: 1,
+          ],
+          customer_email: studentEmail,
+          mode: "payment",
+          metadata: {
+            tuitionPostId: paymentInfo.tuitionPostId,
+            applicationId: paymentInfo.applicationId,
+            tutorId: paymentInfo.tutorId,
+            tutorEmail: paymentInfo.tutorEmail,
+            tuitionCode: paymentInfo.tuitionCode,
+            tuitionTitle: paymentInfo.tuitionTitle,
           },
-        ],
-        customer_email: paymentInfo.studentEmail,
-        mode: "payment",
-        metadata: {
-          tuitionPostId: paymentInfo.tuitionPostId,
-          tutorEmail: paymentInfo.tutorEmail,
-          tuitionCode: paymentInfo.tuitionCode,
-          tuitionTitle: paymentInfo.tuitionTitle,
-        },
-        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-      });
-      res.send({ url: session.url });
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+        });
+        res.send({ url: session.url });
+      } catch (error) {
+        console.error("Error creating payment checkout session:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to create payment session",
+        });
+      }
     });
 
-    // PATCH Verify Payment Success
+    // PATCH /verify-payment-success
     app.patch("/verify-payment-success", async (req, res) => {
       try {
         const sessionId = req.query.session_id;
@@ -963,23 +976,39 @@ async function run() {
         const session = await stripe.checkout.sessions.retrieve(sessionId);
 
         if (session.payment_status !== "paid") {
-          return res.send({
-            success: false,
-            message: "Payment not completed",
-          });
+          return res.send({ success: false, message: "Payment not completed" });
         }
 
-        const { tuitionPostId, tutorEmail, tuitionTitle, tuitionCode } =
-          session.metadata || {};
+        // Extract all necessary metadata
+        const {
+          tuitionPostId,
+          applicationId,
+          tutorId,
+          tutorEmail,
+          tuitionTitle,
+          tuitionCode,
+        } = session.metadata || {};
 
-        if (!tuitionPostId || !tutorEmail) {
+        console.log("Metadata received:", session.metadata);
+
+        if (!tuitionPostId || !applicationId || !tutorId) {
           return res
             .status(400)
             .send({ success: false, message: "Invalid session metadata" });
         }
-
-        const tuitionPostObjectId = new ObjectId(tuitionPostId);
         const paidAt = new Date();
+        // convert to ObjectId safely
+        let tuitionPostObjectId, applicationObjectId, tutorObjectId;
+        try {
+          tuitionPostObjectId = new ObjectId(tuitionPostId);
+          applicationObjectId = new ObjectId(applicationId);
+          tutorObjectId = new ObjectId(tutorId);
+        } catch (err) {
+          console.error("Invalid ObjectId:", err);
+          return res
+            .status(400)
+            .send({ success: false, message: "Invalid IDs in metadata" });
+        }
 
         /* -------------------- 1. Update tuition post -------------------- */
         const tuitionUpdateResult = await tuitionPostsCollection.updateOne(
@@ -992,15 +1021,15 @@ async function run() {
           }
         );
 
-        /* -------------------- 2. Approve selected tutor -------------------- */
+        /* -------------------- 2. Approve selected tutor application -------------------- */
         const applicationUpdateResult =
           await tuitionApplicationsCollection.updateOne(
+            { _id: applicationObjectId },
             {
-              tuitionPostId: tuitionPostObjectId,
-              tutorEmail,
-            },
-            {
-              $set: { status: "approved & paid" },
+              $set: {
+                status: "approved & paid",
+                paymentStatus: "paid",
+              },
             }
           );
 
@@ -1010,14 +1039,17 @@ async function run() {
             {
               tuitionPostId: tuitionPostObjectId,
               status: "pending",
-              tutorEmail: { $ne: tutorEmail },
+              _id: { $ne: applicationObjectId },
             },
-            {
-              $set: { status: "rejected" },
-            }
+            { $set: { status: "rejected" } }
           );
 
-        /* -------------------- 4. Save payment history -------------------- */
+        /* -------------------- 4. Calculate commission and tutor earnings -------------------- */
+        const amount = session.amount_total / 100;
+        const platformFee = Number((amount * 0.1).toFixed(2)); // 10% commission
+        const tutorEarning = Number((amount - platformFee).toFixed(2));
+
+        /* -------------------- 5. Save payment record -------------------- */
         const fullTransactionId = session.payment_intent;
         const displayTransactionId = `ETB-${fullTransactionId
           .slice(-8)
@@ -1028,26 +1060,43 @@ async function run() {
         });
 
         let paymentResult = null;
-
         if (!existingPayment) {
           paymentResult = await paymentCollection.insertOne({
             tuitionPostId: tuitionPostObjectId,
+            applicationId: applicationObjectId,
+            tutorId: tutorObjectId,
+
             tuitionTitle: tuitionTitle || null,
             tuitionCode: tuitionCode || null,
 
             tutorEmail,
             customer_email: session.customer_email,
 
-            amount: session.amount_total / 100,
+            amount,
+            platformFee,
+            tutorEarning,
             currency: session.currency,
 
             transactionId: fullTransactionId,
             displayTransactionId,
-            paymentStatus: session.payment_status,
+            paymentGateway: "stripe",
+
+            paymentStatus: "paid",
+            purpose: "tutor_application_payment",
 
             paidAt,
             createdAt: paidAt,
           });
+        }
+
+        console.log("Payment inserted:", paymentResult.insertedId);
+
+        /* -------------------- 6. Update application with paymentId -------------------- */
+        if (paymentResult) {
+          await tuitionApplicationsCollection.updateOne(
+            { _id: applicationObjectId },
+            { $set: { paymentId: paymentResult.insertedId } }
+          );
         }
 
         return res.send({
@@ -1084,21 +1133,6 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch payment history" });
       }
     });
-
-    // //GET tutor ongoing tuitions
-    // app.get("/tutor/ongoing-tuitions", verifyFBToken, async (req, res) => {
-    //   const tutorEmail = req.user.email;
-    //   const query = {
-    //     tutorEmail: tutorEmail,
-    //     status: "approved & paid",
-    //   };
-    //   const cursor = tuitionApplicationsCollection
-    //     .find(query)
-    //     .sort({ createdAt: -1 });
-    //   const result = await cursor.toArray();
-    //   res.send(result);
-    // });
-
     // GET tutor ongoing tuitions
     app.get("/tutor/ongoing-tuitions", verifyFBToken, async (req, res) => {
       const tutorEmail = req.user.email;
