@@ -233,7 +233,6 @@ async function run() {
             .send({ success: false, message: "Invalid email" });
         }
 
-        // Only fetch users that are not soft-deleted
         const user = await usersCollection.findOne({
           email,
           isDeleted: { $ne: true },
@@ -249,6 +248,7 @@ async function run() {
           success: true,
           role: user.role || "student",
           isAdmin: !!user.isAdmin,
+          profileCompleted: !!user.profileCompleted,
         });
       } catch (err) {
         console.error("GET /users/:email/role error:", err);
@@ -293,6 +293,7 @@ async function run() {
           photoURL: photoURL || null,
           isAdmin: !!isAdmin,
           verified: !!verified,
+          profileCompleted: role === "tutor" ? false : true,
           isDeleted: false,
           createdAt: new Date(),
           updatedAt: new Date(),
