@@ -18,21 +18,34 @@ app.use(express.json());
 app.use(cors());
 
 const verifyFBToken = async (req, res, next) => {
-  //   console.log("headers in the MIddLeWare", req.headers.authorization);
+  const authHeader = req.headers.authorization;
 
-  const token = req.headers.authorization;
-  if (!token) {
-    return res.status(401).send({ message: "unauthorized access" });
+  if (!authHeader) {
+    return res.status(401).send({ message: "No authorization header" });
+  }
+
+  if (!authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Invalid auth format" });
+  }
+
+  const idToken = authHeader.split(" ")[1];
+
+  if (!idToken || idToken === "null" || idToken === "undefined") {
+    return res.status(401).send({ message: "Invalid token" });
   }
 
   try {
-    const idToken = token?.split(" ")?.[1];
-    if (!idToken) return res.status(401).send({ message: "Invalid token" });
     const decoded = await admin.auth().verifyIdToken(idToken);
-    req.user = decoded;
+
+    req.user = {
+      uid: decoded.uid,
+      email: decoded.email?.toLowerCase(),
+    };
+
     next();
   } catch (err) {
-    return res.status(401).send({ message: "unauthorized access" });
+    console.error("verifyFBToken error:", err.message);
+    return res.status(401).send({ message: "Token verification failed" });
   }
 };
 
@@ -41,7 +54,10 @@ const verifyAdmin = (usersCollection) => async (req, res, next) => {
     const fbEmail = req.user?.email;
     if (!fbEmail) return res.status(401).send({ message: "unauthorized" });
 
-    const user = await usersCollection.findOne({ email: fbEmail });
+    const user = await usersCollection.findOne({
+      email: fbEmail,
+      isDeleted: { $ne: true },
+    });
     if (!user || !user.isAdmin) {
       return res.status(403).send({ message: "forbidden access: admin only" });
     }
@@ -51,6 +67,12 @@ const verifyAdmin = (usersCollection) => async (req, res, next) => {
     res.status(500).send({ message: "server error" });
   }
 };
+
+// 🔎 TEMP DEBUG LOGGER (place it HERE)
+app.use((req, res, next) => {
+  console.log("➡️", req.method, req.originalUrl);
+  next();
+});
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@sakinkhan.slpidbs.mongodb.net/?appName=SakinKhan`;
 
@@ -108,18 +130,18 @@ async function run() {
     // GET all users (public)
     app.get("/public-users", async (req, res) => {
       try {
-        const searchText = req.query.searchText?.trim();
+        const search = req.query.search?.trim();
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
         const query = { isDeleted: { $ne: true } };
 
-        if (searchText) {
+        if (search) {
           query.$or = [
-            { name: { $regex: searchText, $options: "i" } },
-            { email: { $regex: searchText, $options: "i" } },
-            { role: { $regex: searchText, $options: "i" } },
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+            { role: { $regex: search, $options: "i" } },
           ];
         }
 
@@ -150,45 +172,41 @@ async function run() {
       }
     });
 
-    // GET all users
-    app.get("/users", verifyFBToken, async (req, res) => {
+    // GET current user
+    app.get("/users/me", verifyFBToken, async (req, res) => {
       try {
-        const searchText = req.query.searchText?.trim();
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-
-        const query = { isDeleted: { $ne: true } };
-
-        if (searchText) {
-          query.$or = [
-            { name: { $regex: searchText, $options: "i" } },
-            { email: { $regex: searchText, $options: "i" } },
-            { role: { $regex: searchText, $options: "i" } },
-          ];
+        const email = req.user?.email;
+        if (!email) {
+          return res.status(401).send({ message: "Unauthorized" });
         }
 
-        const total = await usersCollection.countDocuments(query);
+        const user = await usersCollection.findOne(
+          { email, isDeleted: { $ne: true } },
+          {
+            projection: {
+              role: 1,
+              isAdmin: 1,
+              profileCompleted: 1,
+              name: 1,
+              photoURL: 1,
+            },
+          }
+        );
 
-        const users = await usersCollection
-          .find(query)
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limit)
-          .toArray();
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
 
         res.send({
-          success: true,
-          page,
-          limit,
-          total,
-          users,
+          role: user.role,
+          isAdmin: !!user.isAdmin,
+          profileCompleted: !!user.profileCompleted,
+          name: user.name || null,
+          photoURL: user.photoURL || null,
         });
       } catch (err) {
-        console.error("GET /users error:", err);
-        res
-          .status(500)
-          .send({ success: false, message: "Failed to fetch users" });
+        console.error("GET /users/me error:", err);
+        res.status(500).send({ message: "Server error" });
       }
     });
 
@@ -223,46 +241,51 @@ async function run() {
       }
     });
 
-    // GET user role and admin status
-    app.get("/users/:email/role", verifyFBToken, async (req, res) => {
+    // GET all users
+    app.get("/users", verifyFBToken, async (req, res) => {
       try {
-        const email = req.params.email?.trim().toLowerCase();
-        if (!email) {
-          return res
-            .status(400)
-            .send({ success: false, message: "Invalid email" });
+        const search = req.query.search?.trim();
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+
+        const query = { isDeleted: { $ne: true } };
+
+        if (search) {
+          query.$or = [
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+            { role: { $regex: search, $options: "i" } },
+          ];
         }
 
-        const user = await usersCollection.findOne({
-          email,
-          isDeleted: { $ne: true },
-        });
-
-        if (!user) {
-          return res
-            .status(404)
-            .send({ success: false, message: "User not found" });
-        }
+        const total = await usersCollection.countDocuments(query);
+        const users = await usersCollection
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
 
         res.send({
           success: true,
-          role: user.role || "student",
-          isAdmin: !!user.isAdmin,
-          profileCompleted: !!user.profileCompleted,
+          page,
+          limit,
+          total,
+          users,
         });
       } catch (err) {
-        console.error("GET /users/:email/role error:", err);
+        console.error("GET /users error:", err);
         res
           .status(500)
-          .send({ success: false, message: "Internal server error" });
+          .send({ success: false, message: "Failed to fetch users" });
       }
     });
 
-    // POST /users - Create a new user
+    // POST /users - Create or update user
     app.post("/users", verifyFBToken, async (req, res) => {
       try {
-        const { name, email, role, phone, photoURL, isAdmin, verified } =
-          req.body;
+        const { name, email, role, phone, photoURL } = req.body;
 
         if (!name || !email) {
           return res
@@ -272,40 +295,49 @@ async function run() {
 
         const normalizedEmail = email.trim().toLowerCase();
 
-        // Check if user already exists
+        // Fetch existing user (including deleted check)
         const existingUser = await usersCollection.findOne({
           email: normalizedEmail,
           isDeleted: { $ne: true },
         });
-        if (existingUser) {
-          return res.status(200).send({
-            success: true,
-            user: existingUser,
-            message: "User already exists",
-          });
-        }
 
-        const newUser = {
-          name: name.trim(),
-          email: normalizedEmail,
-          role: role || "student",
-          phone: phone || null,
-          photoURL: photoURL || null,
-          isAdmin: !!isAdmin,
-          verified: !!verified,
-          profileCompleted: role === "tutor" ? false : true,
-          isDeleted: false,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+        // Decide role safely
+        const safeRole =
+          existingUser?.role || (role === "tutor" ? "tutor" : "student");
+
+        const updateDoc = {
+          $set: {
+            name: name.trim(),
+            phone: phone ?? existingUser?.phone ?? null,
+            photoURL: photoURL ?? existingUser?.photoURL ?? null,
+            updatedAt: new Date(),
+          },
+          $setOnInsert: {
+            email: normalizedEmail,
+            role: safeRole,
+            isAdmin: false,
+            isVerified: false,
+            profileCompleted: safeRole === "tutor" ? false : true,
+            isDeleted: false,
+            createdAt: new Date(),
+          },
         };
 
-        const result = await usersCollection.insertOne(newUser);
+        const result = await usersCollection.updateOne(
+          { email: normalizedEmail },
+          updateDoc,
+          { upsert: true }
+        );
+
+        const user = await usersCollection.findOne({ email: normalizedEmail });
 
         res.send({
           success: true,
-          userId: result.insertedId,
-          user: newUser,
-          message: "User created successfully",
+          user,
+          created: result.upsertedCount === 1,
+          message: result.upsertedCount
+            ? "User created successfully"
+            : "User updated successfully",
         });
       } catch (err) {
         console.error("POST /users error:", err);
@@ -325,7 +357,7 @@ async function run() {
             .send({ success: false, message: "Invalid user ID" });
         }
 
-        const { name, phone, role, photoURL, verified, isAdmin } = req.body;
+        const { name, phone, role, photoURL, isVerified, isAdmin } = req.body;
 
         const query = { _id: new ObjectId(id), isDeleted: { $ne: true } };
         const userToUpdate = await usersCollection.findOne(query);
@@ -367,11 +399,12 @@ async function run() {
         if (requesterIsAdmin) {
           if (typeof isAdmin === "boolean") updateFields.isAdmin = isAdmin;
           if (role) updateFields.role = role;
-          if (typeof verified === "boolean") updateFields.verified = verified;
+          if (typeof isVerified === "boolean")
+            updateFields.isVerified = isVerified;
         } else {
           if (
             typeof isAdmin !== "undefined" ||
-            typeof verified !== "undefined" ||
+            typeof isVerified !== "undefined" ||
             role
           ) {
             return res
@@ -558,8 +591,8 @@ async function run() {
           expectedSalary: Number(expectedSalary),
           bio,
 
+          tutorStatus: "pending", // admin approval required
           isActive: true,
-          isVerified: false,
 
           createdAt: now,
           updatedAt: now,
@@ -721,6 +754,7 @@ async function run() {
           {
             $match: {
               isActive: true,
+              tutorStatus: "approved",
             },
           },
 
@@ -802,6 +836,316 @@ async function run() {
       } catch (err) {
         console.error("GET /tutors/public error:", err);
         res.status(500).send({ message: "Failed to fetch tutors" });
+      }
+    });
+
+    // GET /tutors/admin - Admin tutor management
+    app.get(
+      "/tutors/admin",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const search = req.query.search?.trim();
+          const page = parseInt(req.query.page) || 1;
+          const limit = parseInt(req.query.limit) || 10;
+          const skip = (page - 1) * limit;
+
+          const pipeline = [
+            {
+              $lookup: {
+                from: "users",
+                localField: "userId",
+                foreignField: "_id",
+                as: "user",
+              },
+            },
+            { $unwind: "$user" },
+
+            {
+              $match: {
+                "user.isDeleted": { $ne: true },
+              },
+            },
+
+            ...(search
+              ? [
+                  {
+                    $match: {
+                      $or: [
+                        { "user.name": { $regex: search, $options: "i" } },
+                        { "user.email": { $regex: search, $options: "i" } },
+                        { subjects: { $in: [new RegExp(search, "i")] } },
+                      ],
+                    },
+                  },
+                ]
+              : []),
+
+            {
+              $project: {
+                tutorId: "$_id",
+                name: "$user.name",
+                email: "$user.email",
+                photoURL: "$user.photoURL",
+
+                qualifications: 1,
+                experience: 1,
+                subjects: 1,
+                expectedSalary: 1,
+
+                tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
+                tutorApprovedAt: 1,
+                createdAt: 1,
+              },
+            },
+
+            { $sort: { createdAt: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+          ];
+
+          const tutors = await tutorCollection.aggregate(pipeline).toArray();
+
+          const countPipeline = pipeline.filter(
+            (stage) => !stage.$skip && !stage.$limit && !stage.$sort
+          );
+          countPipeline.push({ $count: "total" });
+
+          const countResult = await tutorCollection
+            .aggregate(countPipeline)
+            .toArray();
+
+          res.send({
+            success: true,
+            page,
+            limit,
+            total: countResult[0]?.total || 0,
+            tutors,
+          });
+        } catch (err) {
+          console.error("GET /tutors/admin error:", err);
+          res.status(500).send({ message: "Failed to fetch tutors" });
+        }
+      }
+    );
+
+    // GET /tutors/admin/:id - View full tutor profile (Admin)
+    app.get(
+      "/tutors/admin/:id",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const tutorId = req.params.id;
+
+          if (!ObjectId.isValid(tutorId)) {
+            return res.status(400).send({ message: "Invalid tutor ID" });
+          }
+
+          const pipeline = [
+            {
+              $match: { _id: new ObjectId(tutorId) },
+            },
+            {
+              $lookup: {
+                from: "users",
+                localField: "userId",
+                foreignField: "_id",
+                as: "user",
+              },
+            },
+            { $unwind: "$user" },
+            {
+              $match: {
+                "user.isDeleted": { $ne: true },
+              },
+            },
+            {
+              $project: {
+                tutorId: "$_id",
+                tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
+                tutorApprovedAt: 1,
+
+                qualifications: 1,
+                experience: 1,
+                subjects: 1,
+                expectedSalary: 1,
+                bio: 1,
+
+                createdAt: 1,
+                updatedAt: 1,
+
+                user: {
+                  name: "$user.name",
+                  email: "$user.email",
+                  phone: "$user.phone",
+                  photoURL: "$user.photoURL",
+                  createdAt: "$user.createdAt",
+                },
+              },
+            },
+          ];
+
+          const result = await tutorCollection.aggregate(pipeline).toArray();
+
+          if (!result.length) {
+            return res.status(404).send({ message: "Tutor not found" });
+          }
+
+          res.send({
+            success: true,
+            tutor: result[0],
+          });
+        } catch (err) {
+          console.error("GET /tutors/admin/:id error:", err);
+          res.status(500).send({ message: "Internal server error" });
+        }
+      }
+    );
+
+    // PATCH /tutors/admin/verify/:id - Approve / Reject tutor
+    app.patch(
+      "/tutors/admin/verify/:id",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const tutorId = req.params.id;
+          const { tutorStatus } = req.body;
+
+          // 1. Validate tutorId
+          if (!ObjectId.isValid(tutorId)) {
+            return res.status(400).send({
+              success: false,
+              message: "Invalid tutor ID",
+            });
+          }
+
+          // 2. Validate tutorStatus
+          const allowedStatuses = ["approved", "rejected"];
+          if (!allowedStatuses.includes(tutorStatus)) {
+            return res.status(400).send({
+              success: false,
+              message: "tutorStatus must be 'approved' or 'rejected'",
+            });
+          }
+
+          // 3. Fetch tutor profile
+          const tutor = await tutorCollection.findOne({
+            _id: new ObjectId(tutorId),
+          });
+
+          if (!tutor) {
+            return res.status(404).send({
+              success: false,
+              message: "Tutor not found",
+            });
+          }
+
+          // 4. Update tutor status
+          const updateDoc = {
+            tutorStatus,
+            tutorApprovedAt: tutorStatus === "approved" ? new Date() : null,
+            updatedAt: new Date(),
+          };
+
+          await tutorCollection.updateOne(
+            { _id: tutor._id },
+            { $set: updateDoc }
+          );
+
+          res.send({
+            success: true,
+            message: `Tutor ${tutorStatus} successfully`,
+          });
+        } catch (err) {
+          console.error("PATCH /tutors/admin/verify/:id error:", err);
+          res.status(500).send({
+            success: false,
+            message: "Internal server error",
+          });
+        }
+      }
+    );
+
+    // GET /tutors/:id - Tutor profile
+    app.get("/tutors/:id", verifyFBToken, async (req, res) => {
+      try {
+        const tutorId = req.params.id;
+
+        if (!ObjectId.isValid(tutorId)) {
+          return res.status(400).send({ message: "Invalid tutor ID" });
+        }
+
+        // determine requester is admin
+        const requester = await usersCollection.findOne({
+          email: req.user.email,
+          isDeleted: { $ne: true },
+        });
+        const isAdmin = !!requester?.isAdmin;
+
+        const matchStage = {
+          _id: new ObjectId(tutorId),
+          isActive: true,
+        };
+
+        // public/student/tutor users should only see approved tutors
+        if (!isAdmin) {
+          matchStage.tutorStatus = "approved";
+        }
+
+        const pipeline = [
+          { $match: matchStage },
+
+          {
+            $lookup: {
+              from: "users",
+              localField: "userId",
+              foreignField: "_id",
+              as: "user",
+            },
+          },
+
+          { $unwind: "$user" },
+
+          { $match: { "user.isDeleted": { $ne: true } } },
+
+          {
+            $project: {
+              _id: 1,
+
+              name: "$user.name",
+              email: "$user.email",
+              phone: "$user.phone",
+              photoURL: "$user.photoURL",
+
+              qualifications: 1,
+              experience: 1,
+              subjects: 1,
+              expectedSalary: 1,
+              bio: 1,
+
+              isVerified: "$user.isVerified",
+              isActive: 1,
+              createdAt: 1,
+            },
+          },
+        ];
+
+        const result = await tutorCollection.aggregate(pipeline).toArray();
+
+        if (!result.length) {
+          return res.status(404).send({ message: "Tutor not found" });
+        }
+
+        res.send({
+          success: true,
+          tutor: result[0],
+        });
+      } catch (err) {
+        console.error("GET /tutors/:id error:", err);
+        res.status(500).send({ message: "Internal server error" });
       }
     });
 
@@ -1604,11 +1948,27 @@ async function run() {
         const fbEmail = req.user.email;
 
         /* -------------------- 1. Verify tutor -------------------- */
-        const tutor = await usersCollection.findOne({ email: fbEmail });
-        if (!tutor || tutor.role !== "tutor") {
+        const user = await usersCollection.findOne({ email: fbEmail });
+
+        if (!user || user.role !== "tutor") {
           return res.status(403).send({ error: "Only tutors can apply" });
         }
 
+        const tutorProfile = await tutorCollection.findOne({
+          userId: user._id,
+        });
+
+        if (!tutorProfile) {
+          return res.status(403).send({
+            error: "Tutor profile not found. Complete your profile first.",
+          });
+        }
+
+        if (tutorProfile.tutorStatus !== "approved") {
+          return res.status(403).send({
+            error: "Tutor is not approved by admin yet.",
+          });
+        }
         /* -------------------- 2. Validate input -------------------- */
         if (
           !tuitionPostId ||
