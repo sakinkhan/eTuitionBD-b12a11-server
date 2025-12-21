@@ -51,19 +51,26 @@ const verifyFBToken = async (req, res, next) => {
 
 const verifyAdmin = (usersCollection) => async (req, res, next) => {
   try {
-    const fbEmail = req.user?.email;
-    if (!fbEmail) return res.status(401).send({ message: "unauthorized" });
+    const email = req.user?.email;
+
+    if (!email) {
+      return res.status(401).send({ message: "unauthorized" });
+    }
 
     const user = await usersCollection.findOne({
-      email: fbEmail,
+      email,
       isDeleted: { $ne: true },
     });
-    if (!user || !user.isAdmin) {
-      return res.status(403).send({ message: "forbidden access: admin only" });
+
+    if (!user || user.role !== "admin") {
+      return res.status(403).send({
+        message: "forbidden access: admin only",
+      });
     }
+
     next();
   } catch (err) {
-    console.error("verifyAdmin error", err);
+    console.error("verifyAdmin error:", err);
     res.status(500).send({ message: "server error" });
   }
 };
@@ -194,12 +201,18 @@ async function run() {
         );
 
         if (!user) {
-          return res.status(404).send({ message: "User not found" });
+          return res.send({
+            role: null,
+            isAdmin: false,
+            profileCompleted: false,
+            name: null,
+            photoURL: null,
+          });
         }
 
         res.send({
           role: user.role,
-          isAdmin: !!user.isAdmin,
+          isAdmin: user.role === "admin",
           profileCompleted: !!user.profileCompleted,
           name: user.name || null,
           photoURL: user.photoURL || null,
@@ -377,7 +390,7 @@ async function run() {
             .send({ success: false, message: "Unauthorized" });
         }
 
-        const requesterIsAdmin = !!requester.isAdmin;
+        const requesterIsAdmin = requester.role === "admin";
         const isSelf = req.user.email === userToUpdate.email;
 
         // Non-admin cannot update others
@@ -464,7 +477,11 @@ async function run() {
           const isAdmin = !!req.body.isAdmin;
 
           const result = await usersCollection.updateOne(query, {
-            $set: { isAdmin, updatedAt: new Date() },
+            $set: {
+              isAdmin: true,
+              role: "admin",
+              updatedAt: new Date(),
+            },
           });
 
           res.send({
@@ -803,6 +820,8 @@ async function run() {
               subjects: 1,
               expectedSalary: 1,
               bio: 1,
+
+              tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
               createdAt: 1,
             },
           },
@@ -1083,7 +1102,7 @@ async function run() {
           email: req.user.email,
           isDeleted: { $ne: true },
         });
-        const isAdmin = !!requester?.isAdmin;
+        const isAdmin = requester?.role === "admin";
 
         const matchStage = {
           _id: new ObjectId(tutorId),
@@ -1126,6 +1145,7 @@ async function run() {
               expectedSalary: 1,
               bio: 1,
 
+              tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
               isVerified: "$user.isVerified",
               isActive: 1,
               createdAt: 1,
@@ -1309,37 +1329,52 @@ async function run() {
         if (!ObjectId.isValid(id)) {
           return res.status(400).send({ error: "Invalid tuition post ID" });
         }
-
         const postId = new ObjectId(id);
 
-        const { email, role, isAdmin } = req.user;
+        // 1. Fetch requester from DB
+        const requester = await usersCollection.findOne({
+          email: req.user.email,
+          isDeleted: { $ne: true },
+        });
+        if (!requester) {
+          return res.status(401).send({ error: "Unauthorized" });
+        }
 
-        // Base condition: must not be deleted
+        const role = requester.role;
+        const isAdmin = role === "admin";
+
+        // 2. Base query: must exist & not deleted
         const query = {
           _id: postId,
           isDeleted: { $ne: true },
         };
 
-        // ADMIN: full access
+        // 3. Access rules
         if (!isAdmin) {
           if (role === "tutor") {
-            // Tutors: ONLY admin-approved
+            // Tutors can only see admin-approved posts
             query.status = "admin-approved";
           }
 
           if (role === "student") {
-            // Students: own posts (any status) OR approved posts
-            query.$or = [{ userEmail: email }, { status: "admin-approved" }];
+            query.$or = [
+              { studentEmail: requester.email },
+              { status: "admin-approved" },
+            ];
           }
         }
 
+        // 4. Fetch post
         const post = await tuitionPostsCollection.findOne(query);
 
         if (!post) {
           return res.status(404).send({ error: "Tuition post not found" });
         }
 
-        res.send(post);
+        res.send({
+          success: true,
+          post,
+        });
       } catch (err) {
         console.error("GET /tuition-posts/:id error:", err);
         res.status(500).send({ error: "Failed to fetch tuition post" });
