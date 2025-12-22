@@ -8,7 +8,12 @@ const port = process.env.PORT || 5000;
 
 //firebase admin
 const admin = require("firebase-admin");
-const serviceAccount = require("./etuitionbd-sakinkhan-firebase-adminsdk.json");
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
+);
+const serviceAccount = JSON.parse(decoded);
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
@@ -1172,12 +1177,22 @@ async function run() {
     /* =========================================================
        TUITION POSTS related APIs
     ========================================================== */
-    // GET all tuition posts (public / latest first)
+    // GET all tuition posts (public, searchable, sortable)
     app.get("/tuition-posts", async (req, res) => {
       try {
         const search = req.query.search?.trim() || "";
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = parseInt(req.query.skip) || 0;
+
+        const page = parseInt(req.query.page, 10) || 1;
+        const limit = parseInt(req.query.limit, 10) || 20;
+        const skip = (page - 1) * limit;
+
+        const sortBy = req.query.sortBy || "createdAt";
+        const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+
+        const allowedSortFields = ["createdAt", "budget"];
+        const safeSortBy = allowedSortFields.includes(sortBy)
+          ? sortBy
+          : "createdAt";
 
         const query = {
           status: "admin-approved",
@@ -1197,7 +1212,7 @@ async function run() {
 
         const posts = await tuitionPostsCollection
           .find(query)
-          .sort({ createdAt: -1 })
+          .sort({ [safeSortBy]: sortOrder })
           .skip(skip)
           .limit(limit)
           .toArray();
@@ -1205,7 +1220,7 @@ async function run() {
         res.send({
           success: true,
           total,
-          page: Math.floor(skip / limit) + 1,
+          page,
           limit,
           posts,
         });
@@ -1283,6 +1298,8 @@ async function run() {
           const page = parseInt(req.query.page) || 1;
           const limit = parseInt(req.query.limit) || 20;
           const skip = (page - 1) * limit;
+          const sortBy = req.query.sortBy || "createdAt";
+          const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
 
           const query = { isDeleted: { $ne: true } };
 
@@ -1302,7 +1319,7 @@ async function run() {
 
           const posts = await tuitionPostsCollection
             .find(query)
-            .sort({ createdAt: -1 })
+            .sort({ [sortBy]: sortOrder })
             .skip(skip)
             .limit(limit)
             .toArray();
@@ -2014,12 +2031,7 @@ async function run() {
           return res.status(400).send({ error: "Missing required fields" });
         }
 
-        let tuitionPostObjectId;
-        try {
-          tuitionPostObjectId = new ObjectId(tuitionPostId);
-        } catch {
-          return res.status(400).send({ error: "Invalid tuitionPostId" });
-        }
+        const tuitionPostObjectId = new ObjectId(tuitionPostId);
 
         /* -------------------- 3. Fetch tuition post -------------------- */
         const tuitionPost = await tuitionPostsCollection.findOne({
@@ -2033,7 +2045,7 @@ async function run() {
         /* -------------------- 4. Prevent duplicate application -------------------- */
         const exists = await tuitionApplicationsCollection.findOne({
           tuitionPostId: tuitionPostObjectId,
-          tutorId: tutor._id,
+          tutorId: tutorProfile._id,
         });
 
         if (exists) {
@@ -2052,15 +2064,15 @@ async function run() {
 
           tuitionPostId: tuitionPostObjectId,
 
-          // student (analytics + authorization) ✅ fixed field names
+          // student
           studentId: tuitionPost.studentId || null,
           studentEmail: tuitionPost.studentEmail || null,
 
           // tutor
-          tutorId: tutor._id,
-          tutorName: tutor.name,
-          tutorEmail: tutor.email,
-          tutorPhoto: tutor.photoURL || null,
+          tutorId: tutorProfile._id,
+          tutorName: user.name,
+          tutorEmail: user.email,
+          tutorPhoto: user.photoURL || null,
 
           // application details
           qualifications,
@@ -2906,11 +2918,427 @@ async function run() {
       }
     });
 
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+    /* =========================================================
+       Dashboard ANALYTICS Related APIs
+    ========================================================== */
+    // GET admin revenue summary + application status summary
+
+    app.get(
+      "/admin/analytics/revenue-summary",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const range = req.query.range || "last_7_days";
+
+          const endDate = new Date();
+          endDate.setHours(23, 59, 59, 999);
+
+          const startDate = new Date();
+
+          if (range === "today") {
+            startDate.setHours(0, 0, 0, 0);
+          } else if (range === "last_7_days") {
+            startDate.setDate(endDate.getDate() - 6);
+            startDate.setHours(0, 0, 0, 0);
+          } else if (range === "last_30_days") {
+            startDate.setDate(endDate.getDate() - 29);
+            startDate.setHours(0, 0, 0, 0);
+          }
+
+          /* -------------------- Revenue Aggregation -------------------- */
+          const revenuePipeline = [
+            {
+              $match: {
+                paymentStatus: "paid",
+                paidAt: { $gte: startDate, $lte: endDate },
+                isDeleted: { $ne: true },
+              },
+            },
+            {
+              $group: {
+                _id: {
+                  $dateToString: { format: "%Y-%m-%d", date: "$paidAt" },
+                },
+                grossRevenue: { $sum: "$amount" },
+                platformRevenue: { $sum: "$platformFee" },
+                paymentsCompleted: { $sum: 1 },
+              },
+            },
+            { $sort: { _id: 1 } },
+          ];
+
+          const revenueResult = await paymentCollection
+            .aggregate(revenuePipeline)
+            .toArray();
+
+          const data = revenueResult.map((item) => ({
+            date: new Date(item._id).toLocaleDateString("en-US", {
+              weekday: "short",
+            }),
+            amount: Number(item.grossRevenue.toFixed(2)),
+            platformFee: Number(item.platformRevenue.toFixed(2)),
+            paymentsCompleted: item.paymentsCompleted,
+          }));
+
+          const totals = data.reduce(
+            (acc, curr) => {
+              acc.grossRevenue += curr.amount;
+              acc.platformRevenue += curr.platformFee;
+              acc.paymentsCompleted += curr.paymentsCompleted;
+              return acc;
+            },
+            { grossRevenue: 0, platformRevenue: 0, paymentsCompleted: 0 }
+          );
+
+          /* -------------------- Application Status Counts -------------------- */
+          const [applicationsApproved, applicationsRejected] =
+            await Promise.all([
+              // Approved (payment completed)
+              tuitionApplicationsCollection.countDocuments({
+                status: "paid",
+                paidAt: { $gte: startDate, $lte: endDate },
+                isDeleted: { $ne: true },
+              }),
+
+              // Rejected by student
+              tuitionApplicationsCollection.countDocuments({
+                status: "rejected",
+                updatedAt: { $gte: startDate, $lte: endDate },
+                isDeleted: { $ne: true },
+              }),
+            ]);
+
+          /* -------------------- Response -------------------- */
+          res.send({
+            success: true,
+            range,
+            totals: {
+              ...totals,
+              applicationsApproved,
+              applicationsRejected,
+            },
+            data,
+          });
+        } catch (error) {
+          console.error("Admin revenue summary error:", error);
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch revenue summary",
+          });
+        }
+      }
     );
+
+    // GET admin transaction history
+    app.get(
+      "/admin/analytics/transactions",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const {
+            page = 1,
+            limit = 10,
+            sortBy = "paidAt",
+            sortOrder = "desc",
+            range = "last_7_days",
+          } = req.query;
+
+          const skip = (page - 1) * limit;
+
+          const endDate = new Date();
+          endDate.setHours(23, 59, 59, 999);
+
+          const startDate = new Date();
+
+          if (range === "today") {
+            startDate.setHours(0, 0, 0, 0);
+          } else if (range === "last_7_days") {
+            startDate.setDate(endDate.getDate() - 6);
+            startDate.setHours(0, 0, 0, 0);
+          } else if (range === "last_30_days") {
+            startDate.setDate(endDate.getDate() - 29);
+            startDate.setHours(0, 0, 0, 0);
+          }
+
+          const query = {
+            paymentStatus: "paid",
+            paidAt: { $gte: startDate, $lte: endDate },
+            isDeleted: { $ne: true },
+          };
+
+          const total = await paymentCollection.countDocuments(query);
+
+          const transactions = await paymentCollection
+            .find(query)
+            .sort({ [sortBy]: sortOrder === "asc" ? 1 : -1 })
+            .skip(skip)
+            .limit(Number(limit))
+            .toArray();
+
+          res.send({
+            success: true,
+            page: Number(page),
+            limit: Number(limit),
+            total,
+            transactions,
+          });
+        } catch (error) {
+          console.error("Admin transactions error:", error);
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch transactions",
+          });
+        }
+      }
+    );
+
+    // GET admin pending approvals summary
+    app.get(
+      "/admin/analytics/pending-summary",
+      verifyFBToken,
+      verifyAdmin(usersCollection),
+      async (req, res) => {
+        try {
+          const [tutorsPending, tuitionsPending] = await Promise.all([
+            tutorCollection.countDocuments({
+              tutorStatus: "pending",
+              isActive: true,
+            }),
+
+            tuitionPostsCollection.countDocuments({
+              status: "admin-pending",
+              isDeleted: { $ne: true },
+            }),
+          ]);
+
+          res.send({
+            success: true,
+            totals: {
+              tutorsPending,
+              tuitionsPending,
+              totalPending: tutorsPending + tuitionsPending,
+            },
+          });
+        } catch (error) {
+          console.error("Pending approvals summary error:", error);
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch pending approvals summary",
+          });
+        }
+      }
+    );
+
+    // GET student dashboard quick stats
+    app.get("/student/dashboard-stats", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.user?.email;
+        if (!email) return res.status(401).send({ message: "Unauthorized" });
+
+        // 1) Get student's tuition posts (support both studentEmail and userEmail)
+        const tuitionDocs = await tuitionPostsCollection
+          .find(
+            {
+              isDeleted: { $ne: true },
+              $or: [{ studentEmail: email }, { userEmail: email }],
+            },
+            { projection: { _id: 1 } }
+          )
+          .toArray();
+
+        const tuitionIdsObj = tuitionDocs.map((t) => t._id);
+        const tuitionIdsStr = tuitionDocs.map((t) => t._id.toString());
+
+        // 2) Count applications for those tuitions (support multiple linking styles)
+        const totalApplicationsPromise = tuitionIdsStr.length
+          ? tuitionApplicationsCollection.countDocuments({
+              isDeleted: { $ne: true },
+              $or: [
+                { studentEmail: email },
+                { tuitionPostId: { $in: tuitionIdsStr } },
+                { tuitionPostId: { $in: tuitionIdsObj } }, // if stored as ObjectId
+                { tuitionPostObjectId: { $in: tuitionIdsObj } }, // if you use this field
+              ],
+            })
+          : 0;
+
+        // 3) Payments: match successful payments by this student (support common fields)
+        const paidMatch = {
+          isDeleted: { $ne: true },
+          $and: [
+            {
+              $or: [
+                { studentEmail: email },
+                { userEmail: email },
+                { customer_email: email },
+              ],
+            },
+            {
+              $or: [
+                { paymentStatus: { $in: ["paid", "success"] } },
+                { status: { $in: ["paid", "success"] } },
+                { payment_status: { $in: ["paid", "success"] } },
+              ],
+            },
+          ],
+        };
+
+        // Total spent (sum) + Active tuitions (unique paid tuitionPostIds)
+        const paymentsAggPromise = paymentCollection
+          .aggregate([
+            { $match: paidMatch },
+            {
+              $addFields: {
+                _amount: {
+                  $convert: {
+                    input: {
+                      $ifNull: [
+                        "$amount",
+                        "$totalAmount",
+                        "$paidAmount",
+                        "$price",
+                        "$total",
+                        0,
+                      ],
+                    },
+                    to: "double",
+                    onError: 0,
+                    onNull: 0,
+                  },
+                },
+                _tuitionKey: {
+                  $toString: {
+                    $ifNull: [
+                      "$tuitionPostId",
+                      "$tuitionPostObjectId",
+                      "$metadata.tuitionPostId",
+                      null,
+                    ],
+                  },
+                },
+              },
+            },
+            {
+              $facet: {
+                totalPaid: [
+                  { $group: { _id: null, total: { $sum: "$_amount" } } },
+                ],
+                activeTuitionKeys: [
+                  { $match: { _tuitionKey: { $ne: "null" } } },
+                  { $group: { _id: "$_tuitionKey" } },
+                  { $count: "count" },
+                ],
+              },
+            },
+          ])
+          .toArray();
+
+        const [totalApplications, paymentsAgg] = await Promise.all([
+          totalApplicationsPromise,
+          paymentsAggPromise,
+        ]);
+
+        const totalPaid = paymentsAgg?.[0]?.totalPaid?.[0]?.total ?? 0;
+        const activeTuitions =
+          paymentsAgg?.[0]?.activeTuitionKeys?.[0]?.count ?? 0;
+
+        res.send({
+          totalTuitions: tuitionDocs.length,
+          activeTuitions,
+          totalApplications,
+          totalPaid,
+        });
+      } catch (error) {
+        console.error("Student dashboard stats error:", error);
+        res.status(500).send({ message: "Failed to load dashboard stats" });
+      }
+    });
+
+    // GET Tutor Dashboard stats
+    app.get("/tutor/dashboard-stats", verifyFBToken, async (req, res) => {
+      try {
+        const tutorEmail = req.user.email;
+        const PLATFORM_FEE_RATE = 0.1;
+
+        // Earnings
+        const payments = await paymentCollection
+          .find({
+            tutorEmail,
+            // if you store paid status differently, update this line
+            paymentStatus: "paid",
+            isDeleted: { $ne: true },
+          })
+          .toArray();
+
+        const grossEarnings = payments.reduce(
+          (sum, p) => sum + (p.amount || 0),
+          0
+        );
+        const netEarnings = Math.round(grossEarnings * (1 - PLATFORM_FEE_RATE));
+        const platformFee = grossEarnings - netEarnings;
+
+        //  Ongoing Tuitions
+        const approvedApps = await tuitionApplicationsCollection
+          .find({
+            tutorEmail,
+            isDeleted: { $ne: true },
+            // handle case mismatch: Approved vs approved
+            status: { $in: ["approved", "Approved"] },
+          })
+          .project({ tuitionPostId: 1 })
+          .toArray();
+
+        const tuitionPostIds = approvedApps
+          .map((a) => a.tuitionPostId)
+          .filter(Boolean);
+
+        const tuitionObjectIds = tuitionPostIds
+          .filter((id) => ObjectId.isValid(id))
+          .map((id) => new ObjectId(id));
+
+        // const ongoingTuitions = await tuitionPostsCollection.countDocuments({
+        //   _id: { $in: tuitionObjectIds },
+        //   isDeleted: { $ne: true },
+        //   status: { $in: ["paid", "Paid"] }, // adjust to your real statuses
+        // });
+
+        const ongoingTuitions =
+          await tuitionApplicationsCollection.countDocuments({
+            tutorEmail,
+            isDeleted: { $ne: true },
+            status: { $in: ["paid", "Paid"] },
+            // paymentStatus: { $in: ["paid", "Paid"] },
+            isCompleted: { $ne: true },
+          });
+
+        // Other useful stats
+        const totalApplications =
+          await tuitionApplicationsCollection.countDocuments({
+            tutorEmail,
+            isDeleted: { $ne: true },
+          });
+
+        res.send({
+          grossEarnings,
+          netEarnings,
+          platformFee,
+          ongoingTuitions,
+          totalApplications,
+        });
+      } catch (err) {
+        res
+          .status(500)
+          .send({ message: "Failed to load tutor dashboard stats" });
+      }
+    });
+
+    // Send a ping to confirm a successful connection
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -2922,6 +3350,6 @@ app.get("/", (req, res) => {
   res.send("eTuitionBD server is Sprinting!");
 });
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+// app.listen(port, () => {
+//   console.log(`Example app listening on port ${port}`);
+// });
