@@ -3378,7 +3378,7 @@ async function run() {
     // await client.close();
   }
 }
-run().catch(console.dir);
+// run().catch(console.dir);
 
 app.get("/", (req, res) => {
   res.send("eTuitionBD server is Sprinting!");
@@ -3387,3 +3387,5 @@ app.get("/", (req, res) => {
 // app.listen(port, () => {
 //   console.log(`Example app listening on port ${port}`);
 // });
+
+module.exports = app;
