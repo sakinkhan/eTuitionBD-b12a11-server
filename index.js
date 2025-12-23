@@ -9,6 +9,10 @@ const port = process.env.PORT || 5000;
 //firebase admin
 const admin = require("firebase-admin");
 
+if (!process.env.FB_SERVICE_KEY) {
+  throw new Error("FB_SERVICE_KEY is missing");
+}
+
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
   "utf8"
 );
@@ -80,27 +84,40 @@ const verifyAdmin = (usersCollection) => async (req, res, next) => {
   }
 };
 
-// 🔎 TEMP DEBUG LOGGER (place it HERE)
-app.use((req, res, next) => {
-  console.log("➡️", req.method, req.originalUrl);
-  next();
-});
-
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@sakinkhan.slpidbs.mongodb.net/?appName=SakinKhan`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
+// // Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// const client = new MongoClient(uri, {
+//   serverApi: {
+//     version: ServerApiVersion.v1,
+//     strict: true,
+//     deprecationErrors: true,
+//   },
+// });
+
+let cachedClient = null;
+
+async function getClient() {
+  if (cachedClient) return cachedClient;
+
+  const client = new MongoClient(uri, {
+    serverApi: {
+      version: ServerApiVersion.v1,
+      strict: true,
+      deprecationErrors: true,
+    },
+  });
+
+  await client.connect();
+  cachedClient = client;
+  return client;
+}
 
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
+    const client = await getClient();
 
     // Collections
     const db = client.db("eTuitionBD_db");
@@ -111,19 +128,42 @@ async function run() {
     const countersCollection = db.collection("counters");
     const paymentCollection = db.collection("payments");
 
-    // Ensure unique indexes at server startup
-    await tuitionPostsCollection.createIndex(
-      { tuitionCode: 1 },
-      { unique: true }
-    );
-    await tuitionApplicationsCollection.createIndex(
-      { applicationCode: 1 },
-      { unique: true }
-    );
-    await tuitionApplicationsCollection.createIndex(
-      { tuitionPostId: 1, tutorId: 1 },
-      { unique: true }
-    );
+    async function ensureIndexes() {
+      try {
+        await tuitionPostsCollection.createIndexes([
+          {
+            key: { tuitionCode: 1 },
+            unique: true,
+            name: "tuitionCode_unique",
+          },
+        ]);
+
+        await tuitionApplicationsCollection.createIndexes([
+          {
+            key: { applicationCode: 1 },
+            unique: true,
+            name: "applicationCode_unique",
+          },
+          {
+            key: { tuitionPostId: 1, tutorId: 1 },
+            unique: true,
+            name: "tuition_tutor_unique",
+          },
+        ]);
+
+        console.log("✅ MongoDB indexes ensured");
+      } catch (err) {
+        // Duplicate index or already exists → safe to ignore
+        if (err.codeName === "IndexOptionsConflict") {
+          console.warn("⚠️ Index already exists, skipping");
+        } else {
+          console.error("❌ Failed to create indexes", err);
+          throw err; // real error → surface it
+        }
+      }
+    }
+
+    await ensureIndexes();
 
     // Code generator
     const getNextCode = async (name, prefix) => {
@@ -3298,12 +3338,6 @@ async function run() {
           .filter((id) => ObjectId.isValid(id))
           .map((id) => new ObjectId(id));
 
-        // const ongoingTuitions = await tuitionPostsCollection.countDocuments({
-        //   _id: { $in: tuitionObjectIds },
-        //   isDeleted: { $ne: true },
-        //   status: { $in: ["paid", "Paid"] }, // adjust to your real statuses
-        // });
-
         const ongoingTuitions =
           await tuitionApplicationsCollection.countDocuments({
             tutorEmail,
@@ -3336,9 +3370,9 @@ async function run() {
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
-    // console.log(
-    //   "Pinged your deployment. You successfully connected to MongoDB!"
-    // );
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
