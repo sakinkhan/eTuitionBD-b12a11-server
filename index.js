@@ -86,38 +86,18 @@ const verifyAdmin = (usersCollection) => async (req, res, next) => {
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@sakinkhan.slpidbs.mongodb.net/?appName=SakinKhan`;
 
-// // Create a MongoClient with a MongoClientOptions object to set the Stable API version
-// const client = new MongoClient(uri, {
-//   serverApi: {
-//     version: ServerApiVersion.v1,
-//     strict: true,
-//     deprecationErrors: true,
-//   },
-// });
-
-let cachedClient = null;
-
-async function getClient() {
-  if (cachedClient) return cachedClient;
-
-  const client = new MongoClient(uri, {
-    serverApi: {
-      version: ServerApiVersion.v1,
-      strict: true,
-      deprecationErrors: true,
-    },
-  });
-
-  await client.connect();
-  cachedClient = client;
-  return client;
-}
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
 
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
-    const client = await getClient();
 
     // Collections
     const db = client.db("eTuitionBD_db");
@@ -163,7 +143,7 @@ async function run() {
       }
     }
 
-    await ensureIndexes();
+    // await ensureIndexes();
 
     // Code generator
     const getNextCode = async (name, prefix) => {
@@ -3442,6 +3422,6 @@ module.exports = (req, res) => {
   return app(req, res);
 };
 
-// app.listen(port, () => {
-//   console.log(`Example app listening on port ${port}`);
-// });
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`);
+});
