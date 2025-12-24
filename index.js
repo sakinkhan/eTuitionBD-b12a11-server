@@ -167,13 +167,13 @@ async function run() {
 
     // Code generator
     const getNextCode = async (name, prefix) => {
-      const counter = await countersCollection.findOneAndUpdate(
+      const result = await countersCollection.findOneAndUpdate(
         { name },
         { $inc: { value: 1 } },
         { upsert: true, returnDocument: "after" }
       );
 
-      return `${prefix}-${counter.value}`;
+      return `${prefix}-${result.value.value}`;
     };
 
     /* =========================================================
@@ -1557,7 +1557,7 @@ async function run() {
         }
 
         // 3. Ownership check
-        if (existingPost.userEmail !== fbEmail) {
+        if (existingPost.studentEmail !== fbEmail) {
           return res.status(403).send({ error: "Forbidden. Not your post." });
         }
 
@@ -1569,7 +1569,7 @@ async function run() {
         }
 
         // 5. Status guard: cannot edit after tutor approval or payment
-        const lockedStatuses = ["tutor-approved", "paid", "completed"];
+        const lockedStatuses = ["paid", "completed", "cancelled"];
         if (lockedStatuses.includes(existingPost.status)) {
           return res.status(400).send({
             error: "Cannot edit post after tutor approval or payment",
@@ -1657,10 +1657,7 @@ async function run() {
           // Only pending posts can be moderated
           if (existingPost.status !== "admin-pending") {
             return res.status(400).send({
-              error: `Post already ${existingPost.status.replace(
-                "admin-",
-                ""
-              )}`,
+              error: `Post already ${existingPost.status}`,
             });
           }
 
@@ -1734,7 +1731,7 @@ async function run() {
         }
 
         // Ownership check
-        if (existingPost.userEmail !== fbEmail) {
+        if (existingPost.studentEmail !== fbEmail) {
           return res.status(403).send({ error: "Forbidden. Not your post." });
         }
 
@@ -1795,59 +1792,55 @@ async function run() {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
-        // Base pipeline
-        const basePipeline = [
-          { $match: { studentEmail } },
+        /* -------------------- Base match -------------------- */
+        const matchStage = {
+          studentEmail,
+          isDeleted: { $ne: true },
+        };
 
+        /* -------------------- Aggregation pipeline -------------------- */
+        const pipeline = [
+          { $match: matchStage },
+
+          // Join tuition post
           {
             $lookup: {
-              from: "tuitionApplications",
-              localField: "_id",
-              foreignField: "tuitionPostId",
-              as: "applications",
+              from: "tuitionPosts",
+              localField: "tuitionPostId",
+              foreignField: "_id",
+              as: "tuitionPost",
             },
           },
-          { $unwind: "$applications" },
           {
-            $match: {
-              $or: [
-                { "applications.isDeleted": { $ne: true } },
-                { applications: { $eq: null } },
-              ],
+            $unwind: {
+              path: "$tuitionPost",
+              preserveNullAndEmptyArrays: true,
             },
           },
+
+          // Optional search
           ...(search
             ? [
                 {
                   $match: {
                     $or: [
+                      { tutorName: { $regex: search, $options: "i" } },
+                      { applicationCode: { $regex: search, $options: "i" } },
+                      { status: { $regex: search, $options: "i" } },
                       {
-                        "applications.tutorName": {
-                          $regex: search,
-                          $options: "i",
-                        },
-                      },
-                      { tuitionCode: { $regex: search, $options: "i" } },
-                      {
-                        "applications.qualifications": {
-                          $regex: search,
-                          $options: "i",
-                        },
-                      },
-                      {
-                        "applications.qualifications": {
+                        "tuitionPost.subject": {
                           $regex: search,
                           $options: "i",
                         },
                       },
                       {
-                        "applications.experience": {
+                        "tuitionPost.location": {
                           $regex: search,
                           $options: "i",
                         },
                       },
                       {
-                        "applications.status": {
+                        "tuitionPost.tuitionCode": {
                           $regex: search,
                           $options: "i",
                         },
@@ -1858,48 +1851,55 @@ async function run() {
               ]
             : []),
 
+          // Shape response
           {
             $project: {
-              _id: { $ifNull: ["$applications._id", "$_id"] },
-              applicationCode: "$applications.applicationCode",
-              tutorId: "$applications.tutorId",
-              tutorName: "$applications.tutorName",
-              tutorEmail: "$applications.tutorEmail",
-              tutorPhoto: "$applications.tutorPhoto",
-              qualifications: "$applications.qualifications",
-              experience: "$applications.experience",
-              expectedSalary: "$applications.expectedSalary",
-              status: "$applications.status",
-              createdAt: "$applications.createdAt",
-              tuitionPostId: "$_id",
-              tuitionCode: "$tuitionCode",
-              subject: "$subject",
-              classLevel: "$classLevel",
-              location: "$location",
+              _id: 1,
+              applicationCode: 1,
+
+              tutorId: 1,
+              tutorName: 1,
+              tutorEmail: 1,
+              tutorPhoto: 1,
+
+              qualifications: 1,
+              experience: 1,
+              expectedSalary: 1,
+              finalSalary: 1,
+
+              status: 1,
+              createdAt: 1,
+
+              tuitionPostId: "$tuitionPost._id",
+              tuitionCode: "$tuitionPost.tuitionCode",
+              subject: "$tuitionPost.subject",
+              classLevel: "$tuitionPost.classLevel",
+              location: "$tuitionPost.location",
+
               tuitionTitle: {
                 $concat: [
-                  "$subject",
-                  " - Class: ",
-                  "$classLevel",
-                  " - ",
-                  "$location",
+                  "$tuitionPost.subject",
+                  " – Class ",
+                  "$tuitionPost.classLevel",
+                  " – ",
+                  "$tuitionPost.location",
                 ],
               },
-              studentEmail: "$userEmail",
             },
           },
         ];
 
-        // Count total matching documents
-        const totalResult = await tuitionPostsCollection
-          .aggregate([...basePipeline, { $count: "total" }])
+        /* -------------------- Count -------------------- */
+        const totalResult = await tuitionApplicationsCollection
+          .aggregate([...pipeline, { $count: "total" }])
           .toArray();
+
         const total = totalResult[0]?.total || 0;
 
-        // Apply sorting, skip & limit for pagination
-        const applications = await tuitionPostsCollection
+        /* -------------------- Paginated data -------------------- */
+        const applications = await tuitionApplicationsCollection
           .aggregate([
-            ...basePipeline,
+            ...pipeline,
             { $sort: { createdAt: -1 } },
             { $skip: skip },
             { $limit: limit },
@@ -1915,7 +1915,10 @@ async function run() {
         });
       } catch (err) {
         console.error("GET /applications error:", err);
-        res.status(500).send({ success: false, message: "Server error" });
+        res.status(500).send({
+          success: false,
+          message: "Failed to fetch applications",
+        });
       }
     });
 
@@ -1926,19 +1929,24 @@ async function run() {
       async (req, res) => {
         try {
           const tutorEmail = req.user.email;
+          if (!tutorEmail) {
+            return res.status(401).send({ message: "Unauthorized" });
+          }
+
           const search = req.query.search?.trim();
           const page = parseInt(req.query.page) || 1;
           const limit = parseInt(req.query.limit) || 20;
           const skip = (page - 1) * limit;
 
-          const basePipeline = [
-            // Only this tutor's applications
+          /* -------------------- Base pipeline -------------------- */
+          const pipeline = [
             {
               $match: {
                 tutorEmail,
                 isDeleted: { $ne: true },
               },
             },
+
             // Join tuition post
             {
               $lookup: {
@@ -1954,64 +1962,89 @@ async function run() {
                 preserveNullAndEmptyArrays: true,
               },
             },
-            // Response structure
-            {
-              $project: {
-                _id: 1,
-                applicationCode: 1,
-                tutorEmail: 1,
-                tutorName: 1,
-                tutorPhoto: 1,
-                qualifications: 1,
-                experience: 1,
-                expectedSalary: 1,
-                status: 1,
-                createdAt: 1,
-                tuitionPostId: "$tuitionPost._id",
-                tuitionCode: "$tuitionPost.tuitionCode",
-                subject: "$tuitionPost.subject",
-                classLevel: "$tuitionPost.classLevel",
-                location: "$tuitionPost.location",
-                budget: "$tuitionPost.budget",
-                studentEmail: "$tuitionPost.userEmail",
-                tuitionTitle: {
-                  $concat: [
-                    "$tuitionPost.subject",
-                    " - Class: ",
-                    "$tuitionPost.classLevel",
-                    " - ",
-                    "$tuitionPost.location",
-                  ],
-                },
-              },
-            },
-            // Search filter
+
+            // Optional search
             ...(search
               ? [
                   {
                     $match: {
                       $or: [
                         { applicationCode: { $regex: search, $options: "i" } },
-                        { subject: { $regex: search, $options: "i" } },
                         { status: { $regex: search, $options: "i" } },
-                        { location: { $regex: search, $options: "i" } },
+                        {
+                          "tuitionPost.subject": {
+                            $regex: search,
+                            $options: "i",
+                          },
+                        },
+                        {
+                          "tuitionPost.location": {
+                            $regex: search,
+                            $options: "i",
+                          },
+                        },
+                        {
+                          "tuitionPost.tuitionCode": {
+                            $regex: search,
+                            $options: "i",
+                          },
+                        },
                       ],
                     },
                   },
                 ]
               : []),
+
+            // Shape response
+            {
+              $project: {
+                _id: 1,
+                applicationCode: 1,
+
+                tutorEmail: 1,
+                tutorName: 1,
+                tutorPhoto: 1,
+
+                qualifications: 1,
+                experience: 1,
+                expectedSalary: 1,
+                finalSalary: 1,
+
+                status: 1,
+                createdAt: 1,
+
+                tuitionPostId: "$tuitionPost._id",
+                tuitionCode: "$tuitionPost.tuitionCode",
+                subject: "$tuitionPost.subject",
+                classLevel: "$tuitionPost.classLevel",
+                location: "$tuitionPost.location",
+                budget: "$tuitionPost.budget",
+                studentEmail: "$tuitionPost.studentEmail",
+
+                tuitionTitle: {
+                  $concat: [
+                    "$tuitionPost.subject",
+                    " – Class ",
+                    "$tuitionPost.classLevel",
+                    " – ",
+                    "$tuitionPost.location",
+                  ],
+                },
+              },
+            },
           ];
 
-          // Count total matching documents
+          /* -------------------- Count -------------------- */
           const totalResult = await tuitionApplicationsCollection
-            .aggregate([...basePipeline, { $count: "total" }])
+            .aggregate([...pipeline, { $count: "total" }])
             .toArray();
+
           const total = totalResult[0]?.total || 0;
 
-          // Apply sort, skip & limit for pagination
+          /* -------------------- Paginated data -------------------- */
           const applications = await tuitionApplicationsCollection
             .aggregate([
-              ...basePipeline,
+              ...pipeline,
               { $sort: { createdAt: -1 } },
               { $skip: skip },
               { $limit: limit },
@@ -2027,7 +2060,10 @@ async function run() {
           });
         } catch (err) {
           console.error("GET /applications/my-applications error:", err);
-          res.status(500).send({ success: false, message: "Server error" });
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch tutor applications",
+          });
         }
       }
     );
@@ -2160,6 +2196,7 @@ async function run() {
 
         const application = await tuitionApplicationsCollection.findOne({
           _id: new ObjectId(applicationId),
+          isDeleted: { $ne: true },
         });
 
         if (!application) {
@@ -2175,6 +2212,7 @@ async function run() {
         // Fetch tuition post
         const tuitionPost = await tuitionPostsCollection.findOne({
           _id: new ObjectId(application.tuitionPostId),
+          isDeleted: { $ne: true },
         });
 
         if (!tuitionPost) {
@@ -2182,9 +2220,11 @@ async function run() {
         }
 
         // Ownership check
-        if (tuitionPost.userEmail !== fbEmail) {
+        if (tuitionPost.studentEmail !== fbEmail) {
           return res.status(403).send({ error: "Unauthorized action" });
         }
+
+        const now = new Date();
 
         // Approve selected application
         await tuitionApplicationsCollection.updateOne(
@@ -2193,8 +2233,8 @@ async function run() {
             $set: {
               status: "approved",
               finalSalary: application.expectedSalary,
-              approvedAt: new Date(),
-              updatedAt: new Date(),
+              approvedAt: now,
+              updatedAt: now,
             },
           }
         );
@@ -2209,8 +2249,8 @@ async function run() {
           {
             $set: {
               status: "rejected",
-              rejectedAt: new Date(),
-              updatedAt: new Date(),
+              rejectedAt: now,
+              updatedAt: now,
             },
           }
         );
@@ -2221,7 +2261,8 @@ async function run() {
           {
             $set: {
               status: "approved",
-              approvedAt: new Date(),
+              approvedAt: now,
+              updatedAt: now,
             },
           }
         );
@@ -2231,7 +2272,7 @@ async function run() {
           message: "Tutor application approved",
         });
       } catch (err) {
-        console.error(err);
+        console.error("Approve application error:", err);
         res.status(500).send({ error: "Internal server error" });
       }
     });
@@ -2242,8 +2283,13 @@ async function run() {
         const applicationId = req.params.id;
         const fbEmail = req.user.email;
 
+        if (!ObjectId.isValid(applicationId)) {
+          return res.status(400).send({ error: "Invalid application id" });
+        }
+
         const application = await tuitionApplicationsCollection.findOne({
           _id: new ObjectId(applicationId),
+          isDeleted: { $ne: true },
         });
 
         if (!application) {
@@ -2258,23 +2304,27 @@ async function run() {
 
         const tuitionPost = await tuitionPostsCollection.findOne({
           _id: new ObjectId(application.tuitionPostId),
+          isDeleted: { $ne: true },
         });
 
         if (!tuitionPost) {
           return res.status(404).send({ error: "Tuition post not found" });
         }
 
-        if (tuitionPost.userEmail !== fbEmail) {
+        // Ownership check
+        if (tuitionPost.studentEmail !== fbEmail) {
           return res.status(403).send({ error: "Unauthorized action" });
         }
+
+        const now = new Date();
 
         await tuitionApplicationsCollection.updateOne(
           { _id: application._id },
           {
             $set: {
               status: "rejected",
-              rejectedAt: new Date(),
-              updatedAt: new Date(),
+              rejectedAt: now,
+              updatedAt: now,
             },
           }
         );
@@ -2284,7 +2334,7 @@ async function run() {
           message: "Application rejected",
         });
       } catch (err) {
-        console.error(err);
+        console.error("Reject application error:", err);
         res.status(500).send({ error: "Internal server error" });
       }
     });
@@ -2805,7 +2855,7 @@ async function run() {
           // Lookup tuition to get tuitionCode
           {
             $lookup: {
-              from: "tuitions",
+              from: "tuitionPosts",
               localField: "tuitionPostId",
               foreignField: "_id",
               as: "tuition",
@@ -3325,7 +3375,7 @@ async function run() {
             tutorEmail,
             isDeleted: { $ne: true },
             // handle case mismatch: Approved vs approved
-            status: { $in: ["approved", "Approved"] },
+            status: { $in: ["paid"] },
           })
           .project({ tuitionPostId: 1 })
           .toArray();
@@ -3384,8 +3434,15 @@ app.get("/", (req, res) => {
   res.send("eTuitionBD server is Sprinting!");
 });
 
+run().catch((err) => {
+  console.error("Startup error:", err);
+});
+
+// ✅ Vercel-compatible handler export
+module.exports = (req, res) => {
+  return app(req, res);
+};
+
 // app.listen(port, () => {
 //   console.log(`Example app listening on port ${port}`);
 // });
-
-module.exports = app;
