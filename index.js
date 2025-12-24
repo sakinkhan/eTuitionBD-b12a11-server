@@ -97,8 +97,6 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-
     // Collections
     const db = client.db("eTuitionBD_db");
     const usersCollection = db.collection("users");
@@ -130,8 +128,6 @@ async function run() {
             name: "tuition_tutor_unique",
           },
         ]);
-
-        console.log("✅ MongoDB indexes ensured");
       } catch (err) {
         // Duplicate index or already exists → safe to ignore
         if (err.codeName === "IndexOptionsConflict") {
@@ -149,11 +145,24 @@ async function run() {
     const getNextCode = async (name, prefix) => {
       const result = await countersCollection.findOneAndUpdate(
         { name },
-        { $inc: { value: 1 } },
-        { upsert: true, returnDocument: "after" }
+        {
+          $inc: { value: 1 },
+          $setOnInsert: { name },
+        },
+        {
+          upsert: true,
+          returnDocument: "after",
+        }
       );
 
-      return `${prefix}-${result.value.value}`;
+      const nextVal = result?.value;
+
+      if (typeof nextVal !== "number") {
+        console.log("Debug - Counter Result:", result);
+        throw new Error(`Counter '${name}' failed to generate`);
+      }
+
+      return `${prefix}-${nextVal}`;
     };
 
     /* =========================================================
@@ -484,6 +493,7 @@ async function run() {
       async (req, res) => {
         try {
           const id = req.params.id;
+
           if (!ObjectId.isValid(id)) {
             return res
               .status(400)
@@ -498,13 +508,18 @@ async function run() {
               .status(404)
               .send({ success: false, message: "User not found" });
           }
-
-          const isAdmin = !!req.body.isAdmin;
+          const isAdmin = req.body.isAdmin === true;
+          if (userToUpdate.email === req.user.email && isAdmin === false) {
+            return res.status(400).send({
+              success: false,
+              message: "Admin cannot revoke their own admin access",
+            });
+          }
 
           const result = await usersCollection.updateOne(query, {
             $set: {
-              isAdmin: true,
-              role: "admin",
+              isAdmin,
+              role: isAdmin ? "admin" : "student",
               updatedAt: new Date(),
             },
           });
@@ -1506,8 +1521,20 @@ async function run() {
           tuitionCode,
         });
       } catch (err) {
-        console.error("POST /tuition-post error:", err);
-        res.status(500).send({ error: "Internal server error" });
+        console.error("POST /tuition-post error:", {
+          message: err?.message,
+          code: err?.code,
+          codeName: err?.codeName,
+          name: err?.name,
+          stack: err?.stack,
+        });
+        res.status(500).send({
+          error: "Internal server error",
+          // only expose message outside prod
+          ...(process.env.NODE_ENV !== "production"
+            ? { detail: err?.message }
+            : {}),
+        });
       }
     });
 
@@ -3227,8 +3254,8 @@ async function run() {
               $or: [
                 { studentEmail: email },
                 { tuitionPostId: { $in: tuitionIdsStr } },
-                { tuitionPostId: { $in: tuitionIdsObj } }, // if stored as ObjectId
-                { tuitionPostObjectId: { $in: tuitionIdsObj } }, // if you use this field
+                { tuitionPostId: { $in: tuitionIdsObj } },
+                { tuitionPostObjectId: { $in: tuitionIdsObj } },
               ],
             })
           : 0;
@@ -3372,7 +3399,6 @@ async function run() {
             tutorEmail,
             isDeleted: { $ne: true },
             status: { $in: ["paid", "Paid"] },
-            // paymentStatus: { $in: ["paid", "Paid"] },
             isCompleted: { $ne: true },
           });
 
@@ -3417,11 +3443,13 @@ run().catch((err) => {
   console.error("Startup error:", err);
 });
 
-// ✅ Vercel-compatible handler export
+// Vercel-compatible handler export
 module.exports = (req, res) => {
   return app(req, res);
 };
 
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+if (process.env.NODE_ENV !== "production") {
+  app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
+}
