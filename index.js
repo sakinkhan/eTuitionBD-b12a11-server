@@ -595,6 +595,105 @@ async function run() {
     /* =========================================================
        TUTOR related APIs
     ========================================================== */
+    // GET /tutors/public - Public tutor listing
+    app.get("/tutors/public", async (req, res) => {
+      try {
+        const search = req.query.search?.trim();
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+
+        const pipeline = [
+          // Only active tutors
+          {
+            $match: {
+              isActive: true,
+              tutorStatus: "approved",
+            },
+          },
+
+          // Join users for name & photo
+          {
+            $lookup: {
+              from: "users",
+              localField: "userId",
+              foreignField: "_id",
+              as: "user",
+            },
+          },
+          { $unwind: "$user" },
+
+          // Exclude deleted users
+          {
+            $match: {
+              "user.isDeleted": { $ne: true },
+            },
+          },
+
+          // Search
+          ...(search
+            ? [
+                {
+                  $match: {
+                    $or: [
+                      { "user.name": { $regex: search, $options: "i" } },
+                      { qualifications: { $regex: search, $options: "i" } },
+                      { experience: { $regex: search, $options: "i" } },
+                      { subjects: { $in: [new RegExp(search, "i")] } },
+                    ],
+                  },
+                },
+              ]
+            : []),
+
+          // Shape response
+          {
+            $project: {
+              tutorId: "$_id",
+              name: "$user.name",
+              photoURL: "$user.photoURL",
+              qualifications: 1,
+              experience: 1,
+              subjects: 1,
+              expectedSalary: 1,
+              bio: 1,
+
+              tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
+              createdAt: 1,
+            },
+          },
+
+          { $sort: { createdAt: -1 } },
+          { $skip: skip },
+          { $limit: limit },
+        ];
+
+        const tutors = await tutorCollection.aggregate(pipeline).toArray();
+
+        // Count (without pagination)
+        const countPipeline = pipeline.filter(
+          (stage) => !stage.$skip && !stage.$limit && !stage.$sort
+        );
+        countPipeline.push({ $count: "total" });
+
+        const countResult = await tutorCollection
+          .aggregate(countPipeline)
+          .toArray();
+
+        const total = countResult[0]?.total || 0;
+
+        res.send({
+          success: true,
+          page,
+          limit,
+          total,
+          tutors,
+        });
+      } catch (err) {
+        console.error("GET /tutors/public error:", err);
+        res.status(500).send({ message: "Failed to fetch tutors" });
+      }
+    });
     // POST /tutors - Create tutor profile (first time)
     app.post("/tutors", verifyFBToken, async (req, res) => {
       try {
@@ -800,106 +899,6 @@ async function run() {
       } catch (err) {
         console.error("PATCH /tutors/me error:", err);
         res.status(500).send({ message: "Internal server error" });
-      }
-    });
-
-    // GET /tutors/public - Public tutor listing
-    app.get("/tutors/public", async (req, res) => {
-      try {
-        const search = req.query.search?.trim();
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 20;
-        const skip = (page - 1) * limit;
-
-        const pipeline = [
-          // Only active tutors
-          {
-            $match: {
-              isActive: true,
-              tutorStatus: "approved",
-            },
-          },
-
-          // Join users for name & photo
-          {
-            $lookup: {
-              from: "users",
-              localField: "userId",
-              foreignField: "_id",
-              as: "user",
-            },
-          },
-          { $unwind: "$user" },
-
-          // Exclude deleted users
-          {
-            $match: {
-              "user.isDeleted": { $ne: true },
-            },
-          },
-
-          // Search
-          ...(search
-            ? [
-                {
-                  $match: {
-                    $or: [
-                      { "user.name": { $regex: search, $options: "i" } },
-                      { qualifications: { $regex: search, $options: "i" } },
-                      { experience: { $regex: search, $options: "i" } },
-                      { subjects: { $in: [new RegExp(search, "i")] } },
-                    ],
-                  },
-                },
-              ]
-            : []),
-
-          // Shape response
-          {
-            $project: {
-              tutorId: "$_id",
-              name: "$user.name",
-              photoURL: "$user.photoURL",
-              qualifications: 1,
-              experience: 1,
-              subjects: 1,
-              expectedSalary: 1,
-              bio: 1,
-
-              tutorStatus: { $ifNull: ["$tutorStatus", "pending"] },
-              createdAt: 1,
-            },
-          },
-
-          { $sort: { createdAt: -1 } },
-          { $skip: skip },
-          { $limit: limit },
-        ];
-
-        const tutors = await tutorCollection.aggregate(pipeline).toArray();
-
-        // Count (without pagination)
-        const countPipeline = pipeline.filter(
-          (stage) => !stage.$skip && !stage.$limit && !stage.$sort
-        );
-        countPipeline.push({ $count: "total" });
-
-        const countResult = await tutorCollection
-          .aggregate(countPipeline)
-          .toArray();
-
-        const total = countResult[0]?.total || 0;
-
-        res.send({
-          success: true,
-          page,
-          limit,
-          total,
-          tutors,
-        });
-      } catch (err) {
-        console.error("GET /tutors/public error:", err);
-        res.status(500).send({ message: "Failed to fetch tutors" });
       }
     });
 
