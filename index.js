@@ -14,7 +14,7 @@ if (!process.env.FB_SERVICE_KEY) {
 }
 
 const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
-  "utf8"
+  "utf8",
 );
 const serviceAccount = JSON.parse(decoded);
 
@@ -152,7 +152,7 @@ async function run() {
         {
           upsert: true,
           returnDocument: "after",
-        }
+        },
       );
 
       const nextVal = result?.value;
@@ -231,7 +231,7 @@ async function run() {
               name: 1,
               photoURL: 1,
             },
-          }
+          },
         );
 
         if (!user) {
@@ -373,7 +373,7 @@ async function run() {
         const result = await usersCollection.updateOne(
           { email: normalizedEmail },
           updateDoc,
-          { upsert: true }
+          { upsert: true },
         );
 
         const user = await usersCollection.findOne({ email: normalizedEmail });
@@ -535,7 +535,7 @@ async function run() {
             .status(500)
             .send({ success: false, message: "Internal server error" });
         }
-      }
+      },
     );
 
     // DELETE /users/:id - Soft delete user (admin-only)
@@ -570,7 +570,7 @@ async function run() {
                 deletedAt: new Date(),
                 updatedAt: new Date(),
               },
-            }
+            },
           );
 
           res.send({
@@ -584,7 +584,7 @@ async function run() {
             .status(500)
             .send({ success: false, message: "Internal server error" });
         }
-      }
+      },
     );
 
     /* =========================================================
@@ -667,7 +667,7 @@ async function run() {
 
         // Count (without pagination)
         const countPipeline = pipeline.filter(
-          (stage) => !stage.$skip && !stage.$limit && !stage.$sort
+          (stage) => !stage.$skip && !stage.$limit && !stage.$sort,
         );
         countPipeline.push({ $count: "total" });
 
@@ -764,7 +764,7 @@ async function run() {
               profileCompleted: true,
               updatedAt: now,
             },
-          }
+          },
         );
 
         res.send({
@@ -883,7 +883,7 @@ async function run() {
 
         const result = await tutorCollection.updateOne(
           { userId: user._id },
-          { $set: updateFields }
+          { $set: updateFields },
         );
 
         res.send({
@@ -966,7 +966,7 @@ async function run() {
           const tutors = await tutorCollection.aggregate(pipeline).toArray();
 
           const countPipeline = pipeline.filter(
-            (stage) => !stage.$skip && !stage.$limit && !stage.$sort
+            (stage) => !stage.$skip && !stage.$limit && !stage.$sort,
           );
           countPipeline.push({ $count: "total" });
 
@@ -985,7 +985,7 @@ async function run() {
           console.error("GET /tutors/admin error:", err);
           res.status(500).send({ message: "Failed to fetch tutors" });
         }
-      }
+      },
     );
 
     // GET /tutors/admin/:id - View full tutor profile (Admin)
@@ -1059,7 +1059,7 @@ async function run() {
           console.error("GET /tutors/admin/:id error:", err);
           res.status(500).send({ message: "Internal server error" });
         }
-      }
+      },
     );
 
     // PATCH /tutors/admin/verify/:id - Approve / Reject tutor
@@ -1110,7 +1110,7 @@ async function run() {
 
           await tutorCollection.updateOne(
             { _id: tutor._id },
-            { $set: updateDoc }
+            { $set: updateDoc },
           );
 
           res.send({
@@ -1124,7 +1124,7 @@ async function run() {
             message: "Internal server error",
           });
         }
-      }
+      },
     );
 
     // GET /tutors/:id - Tutor profile
@@ -1369,7 +1369,7 @@ async function run() {
           console.error("Error fetching admin tuition posts:", err);
           res.status(500).send({ error: "Failed to fetch tuition posts" });
         }
-      }
+      },
     );
 
     // GET single tuition post by id
@@ -1617,7 +1617,7 @@ async function run() {
         const result = await tuitionPostsCollection.findOneAndUpdate(
           { _id: postId },
           { $set: updatedFields },
-          { returnDocument: "after" }
+          { returnDocument: "after" },
         );
 
         res.send({
@@ -1694,14 +1694,14 @@ async function run() {
           const result = await tuitionPostsCollection.findOneAndUpdate(
             { _id: postId },
             { $set: update },
-            { returnDocument: "after" }
+            { returnDocument: "after" },
           );
 
           res.send({
             success: true,
             message: `Tuition post ${status.replace(
               "admin-",
-              ""
+              "",
             )} successfully`,
             updatedPost: result.value,
           });
@@ -1709,7 +1709,7 @@ async function run() {
           console.error(err);
           res.status(500).send({ error: "Internal server error" });
         }
-      }
+      },
     );
 
     // DELETE tuition posts
@@ -1758,7 +1758,7 @@ async function run() {
               status: "cancelled",
               updatedAt: new Date(),
             },
-          }
+          },
         );
 
         // 2. Soft-delete related applications instead of removing them
@@ -1771,7 +1771,7 @@ async function run() {
               status: "cancelled",
               updatedAt: new Date(),
             },
-          }
+          },
         );
 
         res.send({
@@ -2071,7 +2071,7 @@ async function run() {
             message: "Failed to fetch tutor applications",
           });
         }
-      }
+      },
     );
 
     // POST /applications - Create Tutor Application
@@ -2174,9 +2174,8 @@ async function run() {
           paidAt: null,
         };
 
-        const result = await tuitionApplicationsCollection.insertOne(
-          newApplication
-        );
+        const result =
+          await tuitionApplicationsCollection.insertOne(newApplication);
 
         res.send({
           success: true,
@@ -2242,7 +2241,7 @@ async function run() {
               approvedAt: now,
               updatedAt: now,
             },
-          }
+          },
         );
 
         // Reject all other pending applications for this tuition
@@ -2258,7 +2257,7 @@ async function run() {
               rejectedAt: now,
               updatedAt: now,
             },
-          }
+          },
         );
 
         // Update tuition post state
@@ -2270,7 +2269,7 @@ async function run() {
               approvedAt: now,
               updatedAt: now,
             },
-          }
+          },
         );
 
         res.send({
@@ -2332,7 +2331,7 @@ async function run() {
               rejectedAt: now,
               updatedAt: now,
             },
-          }
+          },
         );
 
         res.send({
@@ -2415,7 +2414,7 @@ async function run() {
 
           const result = await tuitionApplicationsCollection.updateOne(
             { _id: application._id },
-            { $set: updatedFields }
+            { $set: updatedFields },
           );
 
           res.send({
@@ -2427,7 +2426,7 @@ async function run() {
           console.error(err);
           res.status(500).send({ error: "Internal server error" });
         }
-      }
+      },
     );
 
     // DELETE - Tutor withdraws their own application (PENDING only)
@@ -2477,7 +2476,7 @@ async function run() {
               isDeleted: true,
               deletedAt: new Date(),
             },
-          }
+          },
         );
 
         res.send({
@@ -2601,7 +2600,7 @@ async function run() {
           tutorObjectId,
           studentObjectId,
         ] = [tuitionPostId, applicationId, tutorId, studentId].map(
-          (id) => new ObjectId(id)
+          (id) => new ObjectId(id),
         );
 
         // Fetch tuition post and application
@@ -2631,7 +2630,7 @@ async function run() {
               approvedAt: paidAt,
               updatedAt: paidAt,
             },
-          }
+          },
         );
 
         const amount = session.amount_total / 100;
@@ -2650,7 +2649,7 @@ async function run() {
               approvedAt: paidAt,
               updatedAt: paidAt,
             },
-          }
+          },
         );
 
         // Reject other pending tutors
@@ -2662,7 +2661,7 @@ async function run() {
           },
           {
             $set: { status: "rejected", rejectedAt: paidAt, updatedAt: paidAt },
-          }
+          },
         );
 
         // Save payment record if not exists
@@ -2701,7 +2700,7 @@ async function run() {
           // Link payment to application
           await tuitionApplicationsCollection.updateOne(
             { _id: applicationObjectId },
-            { $set: { paymentId: result.insertedId } }
+            { $set: { paymentId: result.insertedId } },
           );
 
           payment = await paymentCollection.findOne({ _id: result.insertedId });
@@ -2710,7 +2709,7 @@ async function run() {
           if (!application.paymentId) {
             await tuitionApplicationsCollection.updateOne(
               { _id: applicationObjectId },
-              { $set: { paymentId: payment._id } }
+              { $set: { paymentId: payment._id } },
             );
           }
         }
@@ -2925,7 +2924,7 @@ async function run() {
 
         // Count total matching documents (without skip & limit)
         const countPipeline = pipeline.filter(
-          (stage) => !stage.$skip && !stage.$limit
+          (stage) => !stage.$skip && !stage.$limit,
         );
         countPipeline.push({ $count: "total" });
         const countResult = await tuitionApplicationsCollection
@@ -3084,7 +3083,7 @@ async function run() {
               acc.paymentsCompleted += curr.paymentsCompleted;
               return acc;
             },
-            { grossRevenue: 0, platformRevenue: 0, paymentsCompleted: 0 }
+            { grossRevenue: 0, platformRevenue: 0, paymentsCompleted: 0 },
           );
 
           /* -------------------- Application Status Counts -------------------- */
@@ -3123,7 +3122,7 @@ async function run() {
             message: "Failed to fetch revenue summary",
           });
         }
-      }
+      },
     );
 
     // GET admin transaction history
@@ -3187,7 +3186,7 @@ async function run() {
             message: "Failed to fetch transactions",
           });
         }
-      }
+      },
     );
 
     // GET admin pending approvals summary
@@ -3224,7 +3223,7 @@ async function run() {
             message: "Failed to fetch pending approvals summary",
           });
         }
-      }
+      },
     );
 
     // GET student dashboard quick stats
@@ -3240,7 +3239,7 @@ async function run() {
               isDeleted: { $ne: true },
               $or: [{ studentEmail: email }, { userEmail: email }],
             },
-            { projection: { _id: 1 } }
+            { projection: { _id: 1 } },
           )
           .toArray();
 
@@ -3370,7 +3369,7 @@ async function run() {
 
         const grossEarnings = payments.reduce(
           (sum, p) => sum + (p.amount || 0),
-          0
+          0,
         );
         const netEarnings = Math.round(grossEarnings * (1 - PLATFORM_FEE_RATE));
         const platformFee = grossEarnings - netEarnings;
@@ -3423,10 +3422,79 @@ async function run() {
       }
     });
 
+    // GET /statistics - Platform-wide statistics (public endpoint)
+    app.get("/statistics", async (req, res) => {
+      try {
+        console.log("📊 Fetching platform statistics...");
+
+        // 1. Total approved tutors
+        const totalTutors = await tutorCollection.countDocuments({
+          tutorStatus: "approved",
+          isActive: true,
+        });
+        console.log("✅ Total tutors:", totalTutors);
+
+        // 2. Active tuitions (admin-approved posts that are not deleted)
+        const activeTuitions = await tuitionPostsCollection.countDocuments({
+          status: "admin-approved",
+          isDeleted: { $ne: true },
+        });
+        console.log("✅ Active tuitions:", activeTuitions);
+
+        // 3. Successful matches (tuition applications with 'paid' status)
+        const successfulMatches =
+          await tuitionApplicationsCollection.countDocuments({
+            status: "paid",
+            isDeleted: { $ne: true },
+          });
+        console.log("✅ Successful matches:", successfulMatches);
+
+        // 4. Cities covered (using aggregation instead of distinct for Stable API v1 compatibility)
+        const citiesCoveredResult = await tuitionPostsCollection
+          .aggregate([
+            {
+              $match: {
+                status: "admin-approved",
+                isDeleted: { $ne: true },
+              },
+            },
+            {
+              $group: {
+                _id: "$location",
+              },
+            },
+            {
+              $count: "total",
+            },
+          ])
+          .toArray();
+
+        const citiesCovered = citiesCoveredResult[0]?.total || 0;
+        console.log("✅ Cities covered:", citiesCovered);
+
+        res.send({
+          success: true,
+          totalTutors,
+          activeTuitions,
+          successfulMatches,
+          citiesCovered,
+        });
+      } catch (err) {
+        console.error("❌ GET /statistics error:", err.message);
+        console.error("Stack:", err.stack);
+        res.status(500).send({
+          success: false,
+          message: "Failed to fetch platform statistics",
+          error:
+            process.env.NODE_ENV !== "production" ? err.message : undefined,
+        });
+      }
+    });
+
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
     console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+      "Pinged your deployment. You successfully connected to MongoDB!",
     );
   } finally {
     // Ensures that the client will close when you finish/error
