@@ -105,6 +105,7 @@ async function run() {
     const tuitionApplicationsCollection = db.collection("tuitionApplications");
     const countersCollection = db.collection("counters");
     const paymentCollection = db.collection("payments");
+    const newsletterCollection = db.collection("newsletterSubscribers");
 
     async function ensureIndexes() {
       try {
@@ -3487,6 +3488,54 @@ async function run() {
           message: "Failed to fetch platform statistics",
           error:
             process.env.NODE_ENV !== "production" ? err.message : undefined,
+        });
+      }
+    });
+
+    // POST /newsletter/subscribe
+    app.post("/newsletter/subscribe", async (req, res) => {
+      try {
+        const { email } = req.body;
+
+        // Basic validation
+        if (!email) {
+          return res.status(400).send({
+            success: false,
+            message: "Email is required",
+          });
+        }
+
+        // Normalize email
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // Check if already subscribed
+        const existingSubscriber = await newsletterCollection.findOne({
+          email: normalizedEmail,
+        });
+
+        if (existingSubscriber) {
+          return res.status(409).send({
+            success: false,
+            message: "Email already subscribed",
+          });
+        }
+
+        // Insert new subscriber
+        await newsletterCollection.insertOne({
+          email: normalizedEmail,
+          subscribedAt: new Date(),
+          isActive: true,
+        });
+
+        res.status(201).send({
+          success: true,
+          message: "Successfully subscribed to newsletter",
+        });
+      } catch (err) {
+        console.error("❌ Newsletter subscription error:", err);
+        res.status(500).send({
+          success: false,
+          message: "Failed to subscribe to newsletter",
         });
       }
     });
